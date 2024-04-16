@@ -9,6 +9,7 @@ import tensorflow_probability as tfp
 import time
 import torch
 from torch.distributions import Chi2
+import argparse
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
@@ -244,12 +245,31 @@ class SegmentQTL:
         # Save mapping DataFrame to CSV
         mapping.to_csv(f'testing_chr{chr}.csv')
 
-testing, elapsed_t = SegmentQTL("chr22", 
-                     "segmentQTL_inputs/copynumber.csv", 
-                     "segmentQTL_inputs/quantifications.csv", 
-                     "segmentQTL_inputs/covariates.csv", 
-                     "segmentQTL_inputs/ascat.csv",
-                     "segmentQTL_inputs/genotypes/chr22.csv").calculate_associations()
+parser = argparse.ArgumentParser(description='Perform nominal cis-mapping')
+parser.add_argument('chromosome', type=str, help='Chromosome number or X with or without chr prefix')
+parser.add_argument('--copynumber', type=str, default='segmentQTL_inputs/copynumber.csv', help='Path to copynumber CSV file')
+parser.add_argument('--quantifications', type=str, default='segmentQTL_inputs/quantifications.csv', help='Path to quantifications CSV file')
+parser.add_argument('--covariates', type=str, default='segmentQTL_inputs/covariates.csv', help='Path to covariates CSV file')
+parser.add_argument('--ascat', type=str, default='segmentQTL_inputs/ascat.csv', help='Path to ascat CSV file')
+parser.add_argument('--genotypes', type=str, default='segmentQTL_inputs/genotypes', help='Path to genotypes directory')
+
+args = parser.parse_args()
+
+chromosome = args.chromosome
+if not chromosome.startswith('chr'):
+    chromosome = 'chr' + chromosome
+
+copynumber_file = args.copynumber
+quantifications_file = args.quantifications
+covariates_file = args.covariates
+ascat_file = args.ascat
+genotypes_file = f"{args.genotypes}/{chromosome}.csv"
+
+testing, elapsed_t = SegmentQTL(chromosome, 
+                     copynumber_file, 
+                     quantifications_file, 
+                     covariates_file, 
+                     ascat_file,
+                     genotypes_file).calculate_associations()
 
 testing.to_csv('testing_torch.csv')
-
