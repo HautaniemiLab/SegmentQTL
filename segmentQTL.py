@@ -7,6 +7,8 @@ import warnings
 import tensorflow as tf
 import tensorflow_probability as tfp
 import time
+import torch
+from torch.distributions import Chi2
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
@@ -77,14 +79,11 @@ class SegmentQTL:
   
   def ols_reg_loglike(self, X, Y, R2_value=False):
 
-    # Add bias term to input features
-    # Experiment with adding intercept before calling this function
-    #X_with_bias = np.column_stack((np.ones(len(X)), X))
     n = len(Y)
 
     # Convert to TensorFlow tensors
-    X_tf = tf.constant(X, dtype=tf.float32)   # Was X_with_bias
-    Y_tf = tf.constant(Y, dtype=tf.float32)
+    X_tf = tf.constant(X, dtype=tf.float64)
+    Y_tf = tf.constant(Y, dtype=tf.float64)
 
     # Compute coefficients using TensorFlow
     coefficients = tf.linalg.lstsq(X_tf, Y_tf)
@@ -109,55 +108,9 @@ class SegmentQTL:
       SS = tf.reduce_sum(tf.square(Y_tf - Y_mean))
 
       R2 = 1 - SSR / SS
-
       return loglike_res, R2
-       
-       ###########################################
-
-        #df1 = X.shape[1] - 1  # Number of predictors (excluding intercept)
-        #df2 = n - X.shape[1] + 1  # Total number of observations minus number of predictors, plus 1 for intercept
-
-        # Calculate F-statistic
-        #F_statistic = (SSR / df1) / ((1 / n) * SSR)
-
-        # Approximate F-distribution using SigmoidBeta distribution
-        #d1 = df1
-        #d2 = df2
-        #f_dist = tfp.bijectors.Chain([tfp.bijectors.Scale(d2 / d1), tfp.bijectors.Exp()])(tfp.distributions.SigmoidBeta(d1 / 2, d2 / 2))
-
-        # Calculate p-value using the approximate F-distribution
-        #p_value = 1 - f_dist.cdf(F_statistic)
-        #return loglike_res, p_value
 
     return loglike_res
-  
-  
-  #def calc_pvalue(self, sigma2, df1, df2, SSR):
-  #  """
-  #  Calculate the p-value using the F-distribution.
-  #  Args:
-  #  - sigma2: Mean squared error.
-  #  - df1: Degrees of freedom for the numerator.
-  #  - df2: Degrees of freedom for the denominator.
-  #  - SSR: Sum of squares of residuals.
-  #  Returns:
-  #  - p-value.
-  #  """
-  #  F_statistic = (SSR / df1) / (sigma2 / df2)
-  #  p_value = 1 - dist.FisherSnedecor(df1, df2).cdf(F_statistic)
-  #  return p_value.item()  # Convert from tensor to Python float
-  
-  
-  #def calc_pvalue(self, SSR, X_tf, n):
-  #  df_residuals = tf.cast(n - tf.shape(X_tf)[1], dtype=tf.float32)
-  #  F_statistic = (SSR / df_residuals) / ((1 / tf.cast(n, dtype=tf.float32)) * tf.cast(SSR, dtype=tf.float32))
-
-    # Compute p-value using betainc function
-  #  df1 = tf.cast(tf.shape(X_tf)[1], dtype=tf.float32)
-  #  df2 = tf.cast(n - tf.shape(X_tf)[1], dtype=tf.float32)
-  #  p_value = 1 - tf.math.betainc(0.5 * df1, 0.5 * df2, df1 * F_statistic / (df1 * F_statistic + df2))
-
-  #  return p_value
 
 
   def gene_variant_regressions(self, gene_index, current_gene, transf_variants):
@@ -192,10 +145,9 @@ class SegmentQTL:
       #  transf_variants.to_csv('Python_transf.csv')
 
       Y = current_data['GEX'].values.reshape(-1, 1)
-      X = np.column_stack((np.ones(len(Y)), current_data.drop(columns=['GEX'])))
-      #X = current_data.drop(columns=['GEX'])
 
-      #X_nested = current_data.drop(columns=['GEX', 'cur_genotypes'])
+      # Intercept term added 
+      X = np.column_stack((np.ones(len(Y)), current_data.drop(columns=['GEX'])))
       X_nested = np.column_stack((np.ones(len(Y)), current_data.drop(columns=['GEX', 'cur_genotypes'])))
       #X_intercept = np.ones((len(Y), 1))  # Intercept-only model/null model
 
@@ -209,7 +161,20 @@ class SegmentQTL:
       df = 1 # There should be 1 difference in degrees of freedoms as genotypes are dropped from nested model
 
       # Compute p-value using chi-squared distribution
-      pr_over_chi_squared = 1 - tf.math.exp(tf.math.log(tfp.distributions.Chi2(df).cdf(likelihood_ratio_stat)))
+      #pr_over_chi_squared = 1 - tf.math.exp(tf.math.log(tfp.distributions.Chi2(df).cdf(likelihood_ratio_stat)))
+
+      # Try out PyTorch
+
+      # Cast likelihood_ratio_stat to float64
+      likelihood_ratio_stat_numpy = likelihood_ratio_stat.numpy()
+      likelihood_ratio_stat_torch = torch.tensor(likelihood_ratio_stat_numpy, dtype=torch.float64)
+
+      # Create a Chi-squared distribution with degrees of freedom `df`
+      chi2_dist = Chi2(df)
+
+      # Calculate the complementary CDF of the chi-squared distribution
+      pr_over_chi_squared = 1 - torch.exp(torch.log(chi2_dist.cdf(likelihood_ratio_stat_torch)))
+
 
       associations.append({
             'gene': current_gene,
@@ -227,7 +192,7 @@ class SegmentQTL:
   def calculate_associations(self):
     start = time.time()
 
-    limit = self.quan.shape[0]  # For testing, use small number, eg. 3
+    limit = 3 #self.quan.shape[0]  # For testing, use small number, eg. 3
     # Use a list comprehension to generate a list of delayed function calls
     # Each call returns a DataFrame directly
 
@@ -242,7 +207,7 @@ class SegmentQTL:
     print("The time of execution: ",(end-start)/60, " min")
 
     # Concatenate the list of DataFrames into one DataFrame
-    return pd.concat(full_associations)
+    return pd.concat(full_associations), (end-start)/60
 
   def calculate_associations_helper(self, gene_index):
     print(gene_index, "/", self.quan.shape[0]-1)
@@ -254,10 +219,37 @@ class SegmentQTL:
     return cur_associations
 
 
-testing = SegmentQTL("chr22", 
+# Open a text file to save elapsed times
+#with open('elapsed_times.txt', 'a') as f:
+    # Loop over chromosomes
+    for chr in ['X']: #range(1, 23):  # range(1, 22) will loop over 1 to 21
+        # Format file paths
+        copynumber_file = f"segmentQTL_inputs/copynumber.csv"
+        quantifications_file = f"segmentQTL_inputs/quantifications.csv"
+        covariates_file = f"segmentQTL_inputs/covariates.csv"
+        ascat_file = f"segmentQTL_inputs/ascat.csv"
+        genotypes_file = f"segmentQTL_inputs/genotypes/chr{chr}.csv"
+
+        # Call SegmentQTL and measure elapsed time
+        mapping, elapsed_time = SegmentQTL(f"chr{chr}", 
+                                           copynumber_file, 
+                                           quantifications_file, 
+                                           covariates_file, 
+                                           ascat_file,
+                                           genotypes_file).calculate_associations()
+
+        # Save elapsed time to text file
+        f.write(f"Elapsed time for chr{chr}: {elapsed_time} minutes\n")
+
+        # Save mapping DataFrame to CSV
+        mapping.to_csv(f'testing_chr{chr}.csv')
+
+testing, elapsed_t = SegmentQTL("chr22", 
                      "segmentQTL_inputs/copynumber.csv", 
                      "segmentQTL_inputs/quantifications.csv", 
                      "segmentQTL_inputs/covariates.csv", 
                      "segmentQTL_inputs/ascat.csv",
-                     "segmentQTL_inputs/genotypes/chr22.csv").calculate_associations().to_csv('chr22.csv')
+                     "segmentQTL_inputs/genotypes/chr22.csv").calculate_associations()
+
+testing.to_csv('testing_torch.csv')
 
