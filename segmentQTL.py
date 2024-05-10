@@ -96,6 +96,78 @@ class SegmentQTL:
 
         return variants
 
+    def calculate_beta_parameters(self, perm_p_values):
+        if perm_p_values is None or len(perm_p_values) == 0:
+            raise ValueError("Permutation p-values list is empty or None")
+
+        perm_p_values_tensor = torch.tensor(perm_p_values)
+
+        # Calculate mean and variance of permutation p-values
+        mean_p_value = perm_p_values_tensor.mean().item()
+        var_p_value = (
+            perm_p_values_tensor.var().item()
+        )  # Using unbiased sample variance
+
+        # Calculate beta distribution parameters
+        beta_shape1 = mean_p_value * (
+            mean_p_value * (1 - mean_p_value) / var_p_value - 1
+        )
+        beta_shape2 = beta_shape1 * (1 / mean_p_value - 1)
+
+        return beta_shape1, beta_shape2
+
+    def adjust_p_values(self, nominal_p_values, beta_shape1, beta_shape2):
+        beta_dist = torch.distributions.beta.Beta(beta_shape1, beta_shape2)
+
+        # Calculate the adjusted p-values using the beta distribution
+        # TODO: Not implemented error
+        adjusted_p_values = 1 - beta_dist.cdf(nominal_p_values)
+
+        return adjusted_p_values.numpy()
+
+    def gene_variant_regressions_permutations(
+        self, current_gene, g_index, transf_variants, permutations
+    ):
+        permutations_results = pd.DataFrame()
+
+        perm_indices = np.random.choice(
+            range(self.quan.shape[0]), permutations, replace=False
+        )
+
+        for gene_index in perm_indices:
+            # Perform association testing with the permuted gene index
+            associations = self.gene_variant_regressions(
+                gene_index, current_gene, transf_variants
+            )
+
+            # Store the results of the permutation
+            permutations_results = pd.concat(
+                [permutations_results, associations], axis=0, ignore_index=True
+            )
+
+        perm_p_values = permutations_results.loc[:, "pr_over_chi_squared"].values
+        # TODO: This works, but think is there a way to do this without for loop
+        perm_p_values = np.concatenate([arr.ravel() for arr in perm_p_values])
+
+        # Calculate beta parameters
+        beta_shape1, beta_shape2 = self.calculate_beta_parameters(perm_p_values)
+
+        # Perform nominal association testing for the actual data
+        actual_associations = self.gene_variant_regressions(
+            g_index, current_gene, transf_variants
+        )
+        actual_p_values = actual_associations["pr_over_chi_squared"]
+
+        # Adjust p-values using beta approximation
+        adjusted_p_values = self.adjust_p_values(
+            actual_p_values, beta_shape1, beta_shape2
+        )
+
+        # Add adjusted p-values to actual associations
+        actual_associations["p_adj"] = adjusted_p_values
+
+        return actual_associations
+
     def ols_reg_loglike(self, X, Y, R2_value=False):
         n = len(Y)
 
@@ -199,7 +271,7 @@ class SegmentQTL:
                     "gene": current_gene,
                     "variant": variant_index,
                     "R2_value": R2_value.numpy(),
-                    "stats": likelihood_ratio_stat.numpy(),
+                    "likelihood_ratio_stat": likelihood_ratio_stat.numpy(),
                     "log_likelihood_full": loglike_res.numpy(),
                     "log_likelihood_nested": loglike_nested.numpy(),
                     "pr_over_chi_squared": pr_over_chi_squared.numpy(),
@@ -238,11 +310,15 @@ class SegmentQTL:
             current_start, current_end, current_variants
         )
 
-        cur_associations = self.gene_variant_regressions(
-            gene_index,
-            current_gene,
-            transf_variants,
+        cur_associations = self.gene_variant_regressions_permutations(
+            current_gene, gene_index, transf_variants, 10
         )
+
+        # cur_associations = self.gene_variant_regressions(
+        #    gene_index,
+        #    current_gene,
+        #    transf_variants,
+        # )
         return cur_associations
 
 
@@ -275,7 +351,7 @@ with open("elapsed_times.txt", "a") as f:
         f.write(f"Elapsed time for chr{chr}: {elapsed_time} minutes\n")
 
         # Save mapping DataFrame to CSV
-        mapping.to_csv(f"test_chr{chr}.csv")
+        mapping.to_csv(f"test_perm_chr{chr}.csv")
 
 # testing, elapsed_t = SegmentQTL("chr22",
 #                     "segmentQTL_inputs/copynumber.csv",
