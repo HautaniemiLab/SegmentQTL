@@ -5,6 +5,7 @@ import time
 import numpy as np
 import pandas as pd
 import tensorflow as tf
+import tensorflow_probability as tfp
 import torch
 from joblib import Parallel, delayed
 from torch.distributions import Chi2
@@ -100,13 +101,11 @@ class SegmentQTL:
         if perm_p_values is None or len(perm_p_values) == 0:
             raise ValueError("Permutation p-values list is empty or None")
 
-        perm_p_values_tensor = torch.tensor(perm_p_values)
+        perm_p_values_tensor = tf.convert_to_tensor(perm_p_values, dtype=tf.float32)
 
         # Calculate mean and variance of permutation p-values
-        mean_p_value = perm_p_values_tensor.mean().item()
-        var_p_value = (
-            perm_p_values_tensor.var().item()
-        )  # Using unbiased sample variance
+        mean_p_value = tf.reduce_mean(perm_p_values_tensor).numpy()
+        var_p_value = tf.math.reduce_variance(perm_p_values_tensor).numpy()
 
         # Calculate beta distribution parameters
         beta_shape1 = mean_p_value * (
@@ -117,10 +116,9 @@ class SegmentQTL:
         return beta_shape1, beta_shape2
 
     def adjust_p_values(self, nominal_p_values, beta_shape1, beta_shape2):
-        beta_dist = torch.distributions.beta.Beta(beta_shape1, beta_shape2)
+        beta_dist = tfp.distributions.Beta(beta_shape1, beta_shape2)
 
         # Calculate the adjusted p-values using the beta distribution
-        # TODO: Not implemented error
         adjusted_p_values = 1 - beta_dist.cdf(nominal_p_values)
 
         return adjusted_p_values.numpy()
@@ -156,7 +154,8 @@ class SegmentQTL:
         actual_associations = self.gene_variant_regressions(
             g_index, current_gene, transf_variants
         )
-        actual_p_values = actual_associations["pr_over_chi_squared"]
+        actual_p_values = actual_associations.loc[:, "pr_over_chi_squared"].values
+        actual_p_values = np.concatenate([arr.ravel() for arr in actual_p_values])
 
         # Adjust p-values using beta approximation
         adjusted_p_values = self.adjust_p_values(
@@ -311,7 +310,7 @@ class SegmentQTL:
         )
 
         cur_associations = self.gene_variant_regressions_permutations(
-            current_gene, gene_index, transf_variants, 10
+            current_gene, gene_index, transf_variants, 100
         )
 
         # cur_associations = self.gene_variant_regressions(
