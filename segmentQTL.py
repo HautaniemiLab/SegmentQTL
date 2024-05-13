@@ -144,8 +144,6 @@ class SegmentQTL:
             )
 
         perm_p_values = permutations_results.loc[:, "pr_over_chi_squared"].values
-        # TODO: This works, but think is there a way to do this without for loop
-        perm_p_values = np.concatenate([arr.ravel() for arr in perm_p_values])
 
         # Calculate beta parameters
         beta_shape1, beta_shape2 = self.calculate_beta_parameters(perm_p_values)
@@ -155,7 +153,6 @@ class SegmentQTL:
             g_index, current_gene, transf_variants
         )
         actual_p_values = actual_associations.loc[:, "pr_over_chi_squared"].values
-        actual_p_values = np.concatenate([arr.ravel() for arr in actual_p_values])
 
         # Adjust p-values using beta approximation
         adjusted_p_values = self.adjust_p_values(
@@ -273,7 +270,7 @@ class SegmentQTL:
                     "likelihood_ratio_stat": likelihood_ratio_stat.numpy(),
                     "log_likelihood_full": loglike_res.numpy(),
                     "log_likelihood_nested": loglike_nested.numpy(),
-                    "pr_over_chi_squared": pr_over_chi_squared.numpy(),
+                    "pr_over_chi_squared": pr_over_chi_squared.item(),
                 }
             )
 
@@ -310,7 +307,7 @@ class SegmentQTL:
         )
 
         cur_associations = self.gene_variant_regressions_permutations(
-            current_gene, gene_index, transf_variants, 100
+            current_gene, gene_index, transf_variants, 10
         )
 
         # cur_associations = self.gene_variant_regressions(
