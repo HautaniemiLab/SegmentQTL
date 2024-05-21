@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+import cProfile
 import time
 
 import numpy as np
@@ -44,13 +45,10 @@ class SegmentQTL:
         self.genotype = pd.read_csv(genotype, index_col=0)
         self.genotype = self.genotype.loc[:, self.genotype.columns.isin(self.samples)]
         self.genotype = self.genotype[self.samples]
-        # self.genotype = self.genotype.loc[:, self.genotype.columns.isin(self.samples.tolist())]
 
         self.out_dir = out_dir
 
         self.num_cores = num_cores
-
-        # self.genotype.to_csv('Python_genotype.csv')
 
     def start_end_gene_segment(self, gene_index):
         seg_start = self.quan["start"].iloc[gene_index] - 500000
@@ -124,24 +122,24 @@ class SegmentQTL:
         return adjusted_p_values.numpy()
 
     def gene_variant_regressions_permutations(
-        self, current_gene, g_index, transf_variants, permutations
+        self, current_gene, gene_index, transf_variants, permutations
     ):
-        permutations_results = pd.DataFrame()
+        permutations_list = []
 
         perm_indices = np.random.choice(
             range(self.quan.shape[0]), permutations, replace=False
         )
 
-        for gene_index in perm_indices:
+        for index in perm_indices:
             # Perform association testing with the permuted gene index
             associations = self.gene_variant_regressions(
-                gene_index, current_gene, transf_variants
+                index, current_gene, transf_variants
             )
 
             # Store the results of the permutation
-            permutations_results = pd.concat(
-                [permutations_results, associations], axis=0, ignore_index=True
-            )
+            permutations_list.append(associations)
+
+        permutations_results = pd.concat(permutations_list)
 
         perm_p_values = permutations_results.loc[:, "pr_over_chi_squared"].values
 
@@ -150,7 +148,7 @@ class SegmentQTL:
 
         # Perform nominal association testing for the actual data
         actual_associations = self.gene_variant_regressions(
-            g_index, current_gene, transf_variants
+            gene_index, current_gene, transf_variants
         )
         actual_p_values = actual_associations.loc[:, "pr_over_chi_squared"].values
 
@@ -200,12 +198,11 @@ class SegmentQTL:
 
     def gene_variant_regressions(self, gene_index, current_gene, transf_variants):
         associations = []
-        GEX = self.quan.iloc[gene_index, 3:].values.astype(float)
+        GEX = self.quan.iloc[gene_index, 3:].values
         CN = self.copy_number_df.loc[current_gene].values.flatten()
 
         cov_values = [
-            self.cov.loc[covariate].values.flatten().astype(float)
-            for covariate in self.cov.index
+            self.cov.loc[covariate].values.flatten() for covariate in self.cov.index
         ]
 
         for variant_index, variant_values in zip(
@@ -222,7 +219,6 @@ class SegmentQTL:
             )
 
             current_data = pd.DataFrame(data_dict)
-            current_data["GEX"] = pd.to_numeric(current_data["GEX"], errors="coerce")
             current_data = current_data.dropna()
 
             # Make sure that all variables have more than one unique value
@@ -318,36 +314,42 @@ class SegmentQTL:
         return cur_associations
 
 
-# Open a text file to save elapsed times
-with open("elapsed_times.txt", "a") as f:
-    # Loop over chromosomes
-    for chr in [
-        22
-    ]:  # range(1, 23):  # range(1, 23):  # range(1, 22) will loop over 1 to 21
-        # Format file paths
-        copynumber_file = "segmentQTL_inputs/copynumber.csv"
-        quantifications_file = "segmentQTL_inputs/quantifications.csv"
-        covariates_file = "segmentQTL_inputs/covariates.csv"
-        ascat_file = "segmentQTL_inputs/ascat.csv"
-        genotypes_file = f"segmentQTL_inputs/genotypes/chr{chr}_adjusted.csv"
+def main():
+    with open("elapsed_times.txt", "a") as f:
+        # Loop over chromosomes
+        for chr in [
+            22
+        ]:  # range(1, 23):  # range(1, 23):  # range(1, 22) will loop over 1 to 21
+            # Format file paths
+            copynumber_file = "segmentQTL_inputs/copynumber.csv"
+            quantifications_file = "segmentQTL_inputs/quantifications.csv"
+            covariates_file = "segmentQTL_inputs/covariates.csv"
+            ascat_file = "segmentQTL_inputs/ascat.csv"
+            genotypes_file = f"segmentQTL_inputs/genotypes/chr{chr}_adjusted.csv"
 
-        # Call SegmentQTL and measure elapsed time
-        mapping, elapsed_time = SegmentQTL(
-            f"chr{chr}",
-            copynumber_file,
-            quantifications_file,
-            covariates_file,
-            ascat_file,
-            genotypes_file,
-        ).calculate_associations()
+            # Call SegmentQTL and measure elapsed time
+            mapping, elapsed_time = SegmentQTL(
+                f"chr{chr}",
+                copynumber_file,
+                quantifications_file,
+                covariates_file,
+                ascat_file,
+                genotypes_file,
+            ).calculate_associations()
 
-        mapping["chr"] = chr
+            mapping["chr"] = chr
 
-        # Save elapsed time to text file
-        f.write(f"Elapsed time for chr{chr}: {elapsed_time} minutes\n")
+            # Save elapsed time to text file
+            f.write(f"Elapsed time for chr{chr}: {elapsed_time} minutes\n")
 
-        # Save mapping DataFrame to CSV
-        mapping.to_csv(f"test_perm_chr{chr}.csv")
+            # Save mapping DataFrame to CSV
+            mapping.to_csv(f"test_perm_chr{chr}.csv")
+
+
+if __name__ == "__main__":
+    # main()
+    cProfile.run("main()")
+
 
 # testing, elapsed_t = SegmentQTL("chr22",
 #                     "segmentQTL_inputs/copynumber.csv",
