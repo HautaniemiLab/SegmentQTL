@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 
+# from joblib import Parallel, delayed
+import multiprocessing as mp
 import time
 
 import numpy as np
@@ -7,7 +9,6 @@ import pandas as pd
 import tensorflow as tf
 import tensorflow_probability as tfp
 import torch
-from joblib import Parallel, delayed
 
 # from profilehooks import profile
 from torch.distributions import Chi2
@@ -23,7 +24,7 @@ class SegmentQTL:
         ascat,
         genotype,
         out_dir="./",
-        num_cores=1,
+        num_cores=10,
     ):
         self.chromosome = chromosome  # Needs to have 'chr' prefix
 
@@ -303,14 +304,20 @@ class SegmentQTL:
     def calculate_associations(self):
         start = time.time()
 
-        limit = 3  # self.quan.shape[0]  # For testing, use small number, eg. 3
+        limit = self.quan.shape[0]  # For testing, use small number, eg. 3
 
-        full_associations = Parallel(n_jobs=self.num_cores)(
-            delayed(lambda gene_index: self.calculate_associations_helper(gene_index))(
-                index
-            )
-            for index in range(limit)
-        )
+        # Set the start method to 'spawn' for multiprocessing.Pool
+        mp.set_start_method("spawn")
+
+        # Create a multiprocessing Pool
+        pool = mp.Pool(processes=self.num_cores)
+
+        # Map the gene indices to the helper function using the Pool
+        full_associations = pool.map(self.calculate_associations_helper, range(limit))
+
+        # Close the Pool
+        pool.close()
+        pool.join()
 
         end = time.time()
         print("The time of execution: ", (end - start) / 60, " min")
@@ -334,11 +341,6 @@ class SegmentQTL:
             current_gene, gene_index, transf_variants, 100
         )
 
-        # cur_associations = self.gene_variant_regressions(
-        #    gene_index,
-        #    current_gene,
-        #    transf_variants,
-        # )
         return cur_associations
 
 
