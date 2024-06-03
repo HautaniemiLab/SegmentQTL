@@ -8,7 +8,8 @@ import tensorflow as tf
 import tensorflow_probability as tfp
 import torch
 from joblib import Parallel, delayed
-from profilehooks import profile
+
+# from profilehooks import profile
 from torch.distributions import Chi2
 
 
@@ -102,8 +103,8 @@ class SegmentQTL:
         perm_p_values_tensor = tf.constant(perm_p_values, dtype=tf.float64)
 
         # Calculate mean and variance of permutation p-values
-        mean_p_value = tf.reduce_mean(perm_p_values_tensor)  # .numpy()
-        var_p_value = tf.math.reduce_variance(perm_p_values_tensor)  # .numpy()
+        mean_p_value = tf.reduce_mean(perm_p_values_tensor)
+        var_p_value = tf.math.reduce_variance(perm_p_values_tensor)
 
         # Calculate beta distribution parameters
         beta_shape1 = mean_p_value * (
@@ -199,7 +200,7 @@ class SegmentQTL:
 
         return loglike_res
 
-    @profile(filename="new_gene_variant_regressions.prof")
+    # @profile(filename="new_gene_variant_regressions.prof")
     def gene_variant_regressions(self, gene_index, current_gene, transf_variants):
         associations = []
         GEX = self.quan.iloc[gene_index, 3:].values
@@ -211,6 +212,7 @@ class SegmentQTL:
 
         best_corr = 0
         data_best_corr = pd.DataFrame()
+        best_variant = ""
 
         for variant_index, variant_values in zip(
             transf_variants.index, transf_variants.values
@@ -232,15 +234,21 @@ class SegmentQTL:
             if any(current_data[col].nunique() < 2 for col in current_data.columns):
                 continue
 
-            corr = (current_data["GEX"] * current_data["cur_genotypes"]).sum()
+            # corr = (current_data["GEX"] * current_data["cur_genotypes"]).sum()
+            corr = current_data.iloc[:, [0, 2]].corr("pearson").iloc[0, 1]
 
             if np.abs(corr) > np.abs(best_corr):
                 best_corr = corr
                 data_best_corr = current_data
+                best_variant = variant_index
 
-        #################################################################
-        # Here the data is ready (current_data) and regression can begin
-        #################################################################
+        ############################################################################
+        # Here the best variant for the gene has been selected and data is prepared
+        ############################################################################
+
+        # If data_best_corr is empty, return empty df
+        if data_best_corr.shape[0] == 0:
+            return data_best_corr
 
         Y = data_best_corr["GEX"].values.reshape(-1, 1)
 
@@ -264,12 +272,6 @@ class SegmentQTL:
 
         df = 1  # There should be 1 difference in degrees of freedoms as genotypes are dropped from nested model
 
-        # chi2_distr = tfp.distributions.Chi2(df)
-        # chi2_cdf = chi2_distr.cdf(likelihood_ratio_stat)
-
-        # Works with float32, but I can't get it work with float64, even cdf should support it
-        # pr_over_chi_squared = 1 - tf.exp(tf.math.log(chi2_cdf))
-
         # Cast likelihood_ratio_stat to float64 torch tensor
         likelihood_ratio_stat_numpy = likelihood_ratio_stat.numpy()
         likelihood_ratio_stat_torch = torch.tensor(
@@ -287,7 +289,7 @@ class SegmentQTL:
         associations.append(
             {
                 "gene": current_gene,
-                "variant": variant_index,
+                "variant": best_variant,
                 "R2_value": R2_value.numpy(),
                 "likelihood_ratio_stat": likelihood_ratio_stat.numpy(),
                 "log_likelihood_full": loglike_res.numpy(),
