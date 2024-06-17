@@ -24,7 +24,7 @@ class SegmentQTL:
         ascat,
         genotype,
         out_dir="./",
-        num_cores=10,
+        num_cores=3,
     ):
         self.chromosome = chromosome  # Needs to have 'chr' prefix
 
@@ -126,7 +126,7 @@ class SegmentQTL:
         return adjusted_p_value.numpy()
 
     def gene_variant_regressions_permutations(
-        self, current_gene, gene_index, transf_variants, permutations
+        self, gene_index, transf_variants, permutations
     ):
         permutations_list = []
 
@@ -136,9 +136,7 @@ class SegmentQTL:
 
         for index in perm_indices:
             # Perform association testing with the permuted gene index
-            associations = self.gene_variant_regressions(
-                index, current_gene, transf_variants
-            )
+            associations = self.gene_variant_regressions(index, transf_variants)
 
             # Store the results of the permutation
             permutations_list.append(associations)
@@ -151,9 +149,7 @@ class SegmentQTL:
         beta_shape1, beta_shape2 = self.calculate_beta_parameters(perm_p_values)
 
         # Perform nominal association testing for the actual data
-        actual_associations = self.gene_variant_regressions(
-            gene_index, current_gene, transf_variants
-        )
+        actual_associations = self.gene_variant_regressions(gene_index, transf_variants)
         actual_p_value = actual_associations.loc[:, "pr_over_chi_squared"].values[0]
 
         # Adjust p-values using beta approximation
@@ -202,7 +198,8 @@ class SegmentQTL:
         return loglike_res
 
     # @profile(filename="new_gene_variant_regressions.prof")
-    def gene_variant_regressions(self, gene_index, current_gene, transf_variants):
+    def gene_variant_regressions(self, gene_index, transf_variants):
+        current_gene = self.quan.index[gene_index]
         associations = []
         GEX = self.quan.iloc[gene_index, 3:].values
         CN = self.copy_number_df.loc[current_gene].values.flatten()
@@ -247,64 +244,68 @@ class SegmentQTL:
         # Here the best variant for the gene has been selected and data is prepared
         ############################################################################
 
-        # If data_best_corr is empty, return empty df
+        # If data_best_corr is empty
         if data_best_corr.shape[0] == 0:
-            return data_best_corr
+            associations.append(
+                {
+                    "gene": current_gene,
+                    "variant": best_variant,
+                    "R2_value": np.nan,
+                    "likelihood_ratio_stat": np.nan,
+                    "log_likelihood_full": np.nan,
+                    "log_likelihood_nested": np.nan,
+                    "pr_over_chi_squared": np.nan,
+                }
+            )
+        else:
+            Y = data_best_corr["GEX"].values.reshape(-1, 1)
 
-        Y = data_best_corr["GEX"].values.reshape(-1, 1)
+            # Intercept term added
+            # GEX is always the first col
+            X = np.column_stack((np.ones(len(Y)), data_best_corr.iloc[:, 1:]))
+            X_nested = np.column_stack(
+                (np.ones(len(Y)), data_best_corr.drop(columns=["GEX", "cur_genotypes"]))
+            )
 
-        # Intercept term added
-        # X = np.column_stack((np.ones(len(Y)), current_data.drop(columns=["GEX"])))
-        # GEX is always the first col
-        X = np.column_stack((np.ones(len(Y)), data_best_corr.iloc[:, 1:]))
-        X_nested = np.column_stack(
-            (np.ones(len(Y)), data_best_corr.drop(columns=["GEX", "cur_genotypes"]))
-        )
+            loglike_res, R2_value = self.ols_reg_loglike(X, Y, R2_value=True)
+            loglike_nested = self.ols_reg_loglike(X_nested, Y)
 
-        # Testing without R2 value calculation
-        loglike_res, R2_value = self.ols_reg_loglike(X, Y, R2_value=True)
-        # loglike_res = self.ols_reg_loglike(X, Y)
-        loglike_nested = self.ols_reg_loglike(X_nested, Y)
+            likelihood_ratio_stat = -2 * (loglike_nested - loglike_res)
 
-        likelihood_ratio_stat = -2 * (loglike_nested - loglike_res)
-        # likelihood_ratio_stat_conv = tf.cast(
-        #    likelihood_ratio_stat, dtype=tf.float32
-        # )
+            df = 1  # There should be 1 difference in degrees of freedoms as genotypes are dropped from nested model
 
-        df = 1  # There should be 1 difference in degrees of freedoms as genotypes are dropped from nested model
+            # Cast likelihood_ratio_stat to float64 torch tensor
+            likelihood_ratio_stat_numpy = likelihood_ratio_stat.numpy()
+            likelihood_ratio_stat_torch = torch.tensor(
+                likelihood_ratio_stat_numpy, dtype=torch.float64
+            )
 
-        # Cast likelihood_ratio_stat to float64 torch tensor
-        likelihood_ratio_stat_numpy = likelihood_ratio_stat.numpy()
-        likelihood_ratio_stat_torch = torch.tensor(
-            likelihood_ratio_stat_numpy, dtype=torch.float64
-        )
+            # Create a Chi-squared distribution with degrees of freedom `df`
+            chi2_dist = Chi2(df)
 
-        # Create a Chi-squared distribution with degrees of freedom `df`
-        chi2_dist = Chi2(df)
+            # Calculate the complementary CDF of the chi-squared distribution
+            pr_over_chi_squared = 1 - torch.exp(
+                torch.log(chi2_dist.cdf(likelihood_ratio_stat_torch))
+            )
 
-        # Calculate the complementary CDF of the chi-squared distribution
-        pr_over_chi_squared = 1 - torch.exp(
-            torch.log(chi2_dist.cdf(likelihood_ratio_stat_torch))
-        )
-
-        associations.append(
-            {
-                "gene": current_gene,
-                "variant": best_variant,
-                "R2_value": R2_value.numpy(),
-                "likelihood_ratio_stat": likelihood_ratio_stat.numpy(),
-                "log_likelihood_full": loglike_res.numpy(),
-                "log_likelihood_nested": loglike_nested.numpy(),
-                "pr_over_chi_squared": pr_over_chi_squared.item(),
-            }
-        )
+            associations.append(
+                {
+                    "gene": current_gene,
+                    "variant": best_variant,
+                    "R2_value": R2_value.numpy(),
+                    "likelihood_ratio_stat": likelihood_ratio_stat.numpy(),
+                    "log_likelihood_full": loglike_res.numpy(),
+                    "log_likelihood_nested": loglike_nested.numpy(),
+                    "pr_over_chi_squared": pr_over_chi_squared.item(),
+                }
+            )
 
         return pd.DataFrame(associations)
 
     def calculate_associations(self):
         start = time.time()
 
-        limit = self.quan.shape[0]  # For testing, use small number, eg. 3
+        limit = 3  # self.quan.shape[0]  # For testing, use small number, eg. 3
 
         # Set the start method to 'spawn' for multiprocessing.Pool
         mp.set_start_method("spawn")
@@ -327,7 +328,6 @@ class SegmentQTL:
 
     def calculate_associations_helper(self, gene_index):
         print(gene_index, "/", self.quan.shape[0] - 1)
-        current_gene = self.quan.index[gene_index]
         current_start, current_end = self.start_end_gene_segment(gene_index)
         current_variants = self.get_variants_for_gene_segment(
             current_start, current_end
@@ -338,7 +338,7 @@ class SegmentQTL:
         )
 
         cur_associations = self.gene_variant_regressions_permutations(
-            current_gene, gene_index, transf_variants, 100
+            gene_index, transf_variants, 100
         )
 
         return cur_associations
