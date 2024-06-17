@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 # from joblib import Parallel, delayed
+# import cProfile
 import multiprocessing as mp
 import time
 
@@ -9,8 +10,7 @@ import pandas as pd
 import tensorflow as tf
 import tensorflow_probability as tfp
 import torch
-
-# from profilehooks import profile
+from profilehooks import profile
 from torch.distributions import Chi2
 
 
@@ -24,7 +24,7 @@ class SegmentQTL:
         ascat,
         genotype,
         out_dir="./",
-        num_cores=3,
+        num_cores=1,
     ):
         self.chromosome = chromosome  # Needs to have 'chr' prefix
 
@@ -125,6 +125,7 @@ class SegmentQTL:
 
         return adjusted_p_value.numpy()
 
+    # @profile(filename="gene_variant_regressions_permutations.prof")
     def gene_variant_regressions_permutations(
         self, gene_index, transf_variants, permutations
     ):
@@ -197,10 +198,9 @@ class SegmentQTL:
 
         return loglike_res
 
-    # @profile(filename="new_gene_variant_regressions.prof")
-    def gene_variant_regressions(self, gene_index, transf_variants):
+    @profile(filename="program.prof")
+    def best_variant_data(self, gene_index, transf_variants):
         current_gene = self.quan.index[gene_index]
-        associations = []
         GEX = self.quan.iloc[gene_index, 3:].values
         CN = self.copy_number_df.loc[current_gene].values.flatten()
 
@@ -232,7 +232,6 @@ class SegmentQTL:
             if any(current_data[col].nunique() < 2 for col in current_data.columns):
                 continue
 
-            # corr = (current_data["GEX"] * current_data["cur_genotypes"]).sum()
             corr = current_data.iloc[:, [0, 2]].corr("pearson").iloc[0, 1]
 
             if np.abs(corr) > np.abs(best_corr):
@@ -240,9 +239,14 @@ class SegmentQTL:
                 data_best_corr = current_data
                 best_variant = variant_index
 
-        ############################################################################
-        # Here the best variant for the gene has been selected and data is prepared
-        ############################################################################
+        return best_variant, data_best_corr
+
+    def gene_variant_regressions(self, gene_index, transf_variants):
+        associations = []
+        current_gene = self.quan.index[gene_index]
+        best_variant, data_best_corr = self.best_variant_data(
+            gene_index, transf_variants
+        )
 
         # If data_best_corr is empty
         if data_best_corr.shape[0] == 0:
@@ -338,7 +342,7 @@ class SegmentQTL:
         )
 
         cur_associations = self.gene_variant_regressions_permutations(
-            gene_index, transf_variants, 100
+            gene_index, transf_variants, 10
         )
 
         return cur_associations
