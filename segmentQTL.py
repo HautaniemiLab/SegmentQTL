@@ -201,42 +201,59 @@ class SegmentQTL:
     @profile(filename="program.prof")
     def best_variant_data(self, gene_index, transf_variants):
         current_gene = self.quan.index[gene_index]
-        GEX = self.quan.iloc[gene_index, 3:].values
+        GEX = pd.to_numeric(self.quan.iloc[gene_index, 3:], errors="coerce").values
         CN = self.copy_number_df.loc[current_gene].values.flatten()
 
         cov_values = [
-            self.cov.loc[covariate].values.flatten() for covariate in self.cov.index
+            pd.to_numeric(self.cov.loc[covariate], errors="coerce").values.flatten()
+            for covariate in self.cov.index
         ]
 
         best_corr = 0
         data_best_corr = pd.DataFrame()
         best_variant = ""
 
-        for variant_index, variant_values in zip(
+        for variant_index, cur_genotypes in zip(
             transf_variants.index, transf_variants.values
         ):
-            cur_genotypes = variant_values
+            # Filter out rows with NaNs in any of the required columns
+            mask = ~np.isnan(GEX) & ~np.isnan(CN) & ~np.isnan(cur_genotypes)
+            for cov_value in cov_values:
+                mask &= ~np.isnan(cov_value)
 
-            data_dict = {"GEX": GEX, "CN": CN, "cur_genotypes": cur_genotypes}
-            data_dict.update(
-                {
-                    covariate: cov_value
-                    for covariate, cov_value in zip(self.cov.index, cov_values)
-                }
-            )
-
-            current_data = pd.DataFrame(data_dict)
-            current_data = current_data.dropna()
-
-            # Make sure that all variables have more than one unique value
-            if any(current_data[col].nunique() < 2 for col in current_data.columns):
+            # Apply mask to all columns
+            if np.sum(mask) < 2:  # If less than 2 valid rows, skip this variant
                 continue
 
-            corr = current_data.iloc[:, [0, 2]].corr("pearson").iloc[0, 1]
+            GEX_filtered = GEX[mask]
+            CN_filtered = CN[mask]
+            cur_genotypes_filtered = cur_genotypes[mask]
+            cov_values_filtered = [cov_value[mask] for cov_value in cov_values]
+
+            # Ensure each column has more than one unique value
+            if (
+                len(np.unique(GEX_filtered)) < 2
+                or len(np.unique(cur_genotypes_filtered)) < 2
+            ):
+                continue
+
+            data_dict = {
+                "GEX": GEX_filtered,
+                "CN": CN_filtered,
+                "cur_genotypes": cur_genotypes_filtered,
+            }
+
+            for covariate, cov_value_filtered in zip(
+                self.cov.index, cov_values_filtered
+            ):
+                data_dict[covariate] = cov_value_filtered
+
+            # Calculate Pearson correlation
+            corr = np.corrcoef(GEX_filtered, cur_genotypes_filtered)[0, 1]
 
             if np.abs(corr) > np.abs(best_corr):
                 best_corr = corr
-                data_best_corr = current_data
+                data_best_corr = pd.DataFrame(data_dict)
                 best_variant = variant_index
 
         return best_variant, data_best_corr
