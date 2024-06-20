@@ -25,14 +25,14 @@ class SegmentQTL:
         ascat,
         genotype,
         out_dir="./",
-        num_cores=5,
+        num_cores=7,
     ):
         self.chromosome = chromosome  # Needs to have 'chr' prefix
 
         self.copy_number_df = pd.read_csv(copynumber, index_col=0)
 
-        self.quan = pd.read_csv(quantifications, index_col=3)
-        self.quan = self.quan[self.quan.chr == self.chromosome]
+        self.full_quan = pd.read_csv(quantifications, index_col=3)
+        self.quan = self.full_quan[self.full_quan.chr == self.chromosome]
 
         self.samples = self.quan.columns.to_numpy()[3:]
 
@@ -136,12 +136,14 @@ class SegmentQTL:
         permutations_list = []
 
         perm_indices = np.random.choice(
-            range(self.quan.shape[0]), permutations, replace=False
+            range(self.full_quan.shape[0]), permutations, replace=False
         )
 
         for index in perm_indices:
             # Perform association testing with the permuted gene index
-            associations = self.gene_variant_regressions(index, transf_variants)
+            associations = self.gene_variant_regressions(
+                index, transf_variants, self.full_quan
+            )
 
             # Store the results of the permutation
             permutations_list.append(associations)
@@ -155,7 +157,9 @@ class SegmentQTL:
         beta_shape1, beta_shape2 = self.calculate_beta_parameters(perm_p_values)
 
         # Perform nominal association testing for the actual data
-        actual_associations = self.gene_variant_regressions(gene_index, transf_variants)
+        actual_associations = self.gene_variant_regressions(
+            gene_index, transf_variants, self.quan
+        )
         actual_p_value = actual_associations.loc[:, "pr_over_chi_squared"].values[0]
 
         # Adjust p-values using beta approximation
@@ -204,9 +208,11 @@ class SegmentQTL:
         return loglike_res
 
     # @profile(filename="program.prof")
-    def best_variant_data(self, gene_index, transf_variants):
-        current_gene = self.quan.index[gene_index]
-        GEX = pd.to_numeric(self.quan.iloc[gene_index, 3:], errors="coerce").values
+    def best_variant_data(self, gene_index, transf_variants, quantifications):
+        current_gene = quantifications.index[gene_index]
+        GEX = pd.to_numeric(
+            quantifications.iloc[gene_index, 3:], errors="coerce"
+        ).values
         CN = self.copy_number_df.loc[current_gene].values.flatten()
 
         cov_values = [
@@ -271,11 +277,11 @@ class SegmentQTL:
 
         return best_variant, data_best_corr
 
-    def gene_variant_regressions(self, gene_index, transf_variants):
+    def gene_variant_regressions(self, gene_index, transf_variants, quantifications):
         associations = []
-        current_gene = self.quan.index[gene_index]
+        current_gene = quantifications.index[gene_index]
         best_variant, data_best_corr = self.best_variant_data(
-            gene_index, transf_variants
+            gene_index, transf_variants, quantifications
         )
 
         def create_association(
@@ -317,7 +323,7 @@ class SegmentQTL:
 
         likelihood_ratio_stat = -2 * (loglike_nested - loglike_res)
 
-        if np.isnan(likelihood_ratio_stat):
+        if np.isnan(likelihood_ratio_stat) or likelihood_ratio_stat.numpy() < 0:
             print("Likelihood ratio nan:", current_gene)
             associations.append(
                 create_association(
