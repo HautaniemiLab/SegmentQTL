@@ -2,17 +2,22 @@
 
 # from joblib import Parallel, delayed
 # import cProfile
-import multiprocessing as mp
+# import multiprocessing as mp
 import time
 
+import dask
 import numpy as np
 import pandas as pd
 import tensorflow as tf
 import tensorflow_probability as tfp
 import torch
+from dask.distributed import Client
 
 # from profilehooks import profile
 from torch.distributions import Chi2
+
+# ray.init()
+client = Client(threads_per_worker=4, n_workers=1)
 
 
 class SegmentQTL:
@@ -25,7 +30,7 @@ class SegmentQTL:
         ascat,
         genotype,
         out_dir="./",
-        num_cores=7,
+        num_cores=5,
     ):
         self.chromosome = chromosome  # Needs to have 'chr' prefix
 
@@ -359,26 +364,23 @@ class SegmentQTL:
     def calculate_associations(self):
         start = time.time()
 
-        limit = self.quan.shape[0]  # For testing, use small number, eg. 3
+        limit = 15  # self.quan.shape[0]  # For testing, use small number, eg. 3
 
-        # Set the start method to 'spawn' for multiprocessing.Pool
-        mp.set_start_method("spawn")
+        associations = []
 
-        # Create a multiprocessing Pool
-        pool = mp.Pool(processes=self.num_cores)
+        for gene_index in range(limit):
+            association_result = dask.delayed(self.calculate_associations_helper)(
+                gene_index
+            )
+            associations.append(association_result)
 
-        # Map the gene indices to the helper function using the Pool
-        full_associations = pool.map(self.calculate_associations_helper, range(limit))
-
-        # Close the Pool
-        pool.close()
-        pool.join()
+        dask.compute(*associations)
 
         end = time.time()
         print("The time of execution: ", (end - start) / 60, " min")
 
         # Concatenate the list of DataFrames into one DataFrame
-        return pd.concat(full_associations), (end - start) / 60
+        return pd.concat(associations), (end - start) / 60
 
     def calculate_associations_helper(self, gene_index):
         print(gene_index + 1, "/", self.quan.shape[0])
@@ -431,5 +433,6 @@ def main():
 
 
 if __name__ == "__main__":
+    # freeze_support()
     main()
     # cProfile.run("main()")
