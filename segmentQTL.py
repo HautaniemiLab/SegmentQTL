@@ -5,14 +5,19 @@
 import multiprocessing as mp
 import time
 
+# import dask
 import numpy as np
 import pandas as pd
 import tensorflow as tf
 import tensorflow_probability as tfp
 import torch
 
+# from dask.distributed import Client
 # from profilehooks import profile
 from torch.distributions import Chi2
+
+# ray.init()
+# client = Client(threads_per_worker=4, n_workers=1)
 
 
 class SegmentQTL:
@@ -25,7 +30,8 @@ class SegmentQTL:
         ascat,
         genotype,
         out_dir="./",
-        num_cores=7,
+        num_cores=5,
+        num_permutations=100,
     ):
         self.chromosome = chromosome  # Needs to have 'chr' prefix
 
@@ -52,6 +58,8 @@ class SegmentQTL:
         self.out_dir = out_dir
 
         self.num_cores = num_cores
+
+        self.num_permutations = num_permutations
 
     def start_end_gene_segment(self, gene_index):
         seg_start = self.quan["start"].iloc[gene_index] - 500000
@@ -129,14 +137,19 @@ class SegmentQTL:
 
         return adjusted_p_value.numpy()
 
-    # @profile(filename="gene_variant_regressions_permutations.prof")
-    def gene_variant_regressions_permutations(
-        self, gene_index, transf_variants, permutations
-    ):
+    def gene_variant_regressions_permutations(self, gene_index, transf_variants):
+        # Perform nominal association testing for the actual data
+        actual_associations = self.gene_variant_regressions(
+            gene_index, transf_variants, self.quan
+        )
+
+        if self.num_permutations == 0:
+            return actual_associations
+
         permutations_list = []
 
         perm_indices = np.random.choice(
-            range(self.full_quan.shape[0]), permutations, replace=False
+            range(self.full_quan.shape[0]), self.num_permutations, replace=False
         )
 
         for index in perm_indices:
@@ -150,16 +163,8 @@ class SegmentQTL:
 
         permutations_results = pd.concat(permutations_list)
 
-        # perm_p_values = permutations_results.loc[:, "pr_over_chi_squared"].values
         perm_p_values = permutations_results["pr_over_chi_squared"].dropna().values
-
-        # Calculate beta parameters
         beta_shape1, beta_shape2 = self.calculate_beta_parameters(perm_p_values)
-
-        # Perform nominal association testing for the actual data
-        actual_associations = self.gene_variant_regressions(
-            gene_index, transf_variants, self.quan
-        )
         actual_p_value = actual_associations.loc[:, "pr_over_chi_squared"].values[0]
 
         # Adjust p-values using beta approximation
@@ -172,7 +177,6 @@ class SegmentQTL:
 
         return actual_associations
 
-    # @profile(filename="loglike_new.prof")
     def ols_reg_loglike(self, X, Y, R2_value=False):
         n = len(Y)
 
@@ -207,7 +211,6 @@ class SegmentQTL:
 
         return loglike_res
 
-    # @profile(filename="program.prof")
     def best_variant_data(self, gene_index, transf_variants, quantifications):
         current_gene = quantifications.index[gene_index]
         GEX = pd.to_numeric(
@@ -228,7 +231,6 @@ class SegmentQTL:
             transf_variants.index, transf_variants.values
         ):
             # Check for shape mismatch
-            # TODO: Why there exists mismatches?
             lengths = [len(GEX), len(CN), len(cur_genotypes)] + [
                 len(cov_value) for cov_value in cov_values
             ]
@@ -331,8 +333,7 @@ class SegmentQTL:
                 )
             )
         else:
-            # TODO: Double-check the appropriate degrees of freedom
-            # I used 1, because it is the difference between full and nested models after genotypes are dropped
+            # Degrees of freedom = 1, because it is the difference between full and nested models after genotypes are dropped
             chi2_dist = Chi2(1)
             pr_over_chi_squared = 1 - torch.exp(
                 torch.log(
@@ -392,7 +393,7 @@ class SegmentQTL:
         )
 
         cur_associations = self.gene_variant_regressions_permutations(
-            gene_index, transf_variants, 100
+            gene_index, transf_variants
         )
 
         return cur_associations
@@ -401,9 +402,7 @@ class SegmentQTL:
 def main():
     with open("elapsed_times.txt", "a") as f:
         # Loop over chromosomes
-        for chr in [
-            22
-        ]:  # range(1, 23):  # range(1, 23):  # range(1, 22) will loop over 1 to 21
+        for chr in [22]:  # range(1, 23):  # range(1, 22) will loop over 1 to 21
             # Format file paths
             copynumber_file = "segmentQTL_inputs/copynumber.csv"
             quantifications_file = "segmentQTL_inputs/quantifications.csv"
@@ -432,4 +431,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    # cProfile.run("main()")
