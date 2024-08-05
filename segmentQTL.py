@@ -2,6 +2,7 @@
 
 # from joblib import Parallel, delayed
 # import cProfile
+import argparse
 import multiprocessing as mp
 import time
 
@@ -24,16 +25,17 @@ class SegmentQTL:
     def __init__(
         self,
         chromosome,
+        mode,
         copynumber,
         quantifications,
         covariates,
         ascat,
         genotype,
+        num_permutations,
         out_dir="./",
         num_cores=5,
-        num_permutations=100,
     ):
-        self.chromosome = chromosome  # Needs to have 'chr' prefix
+        self.chromosome = chromosome
 
         self.copy_number_df = pd.read_csv(copynumber, index_col=0)
 
@@ -59,7 +61,10 @@ class SegmentQTL:
 
         self.num_cores = num_cores
 
-        self.num_permutations = num_permutations
+        if mode == "nominal":
+            self.num_permutations = 0
+        else:
+            self.num_permutations = num_permutations
 
     def start_end_gene_segment(self, gene_index):
         seg_start = self.quan["start"].iloc[gene_index] - 500000
@@ -360,7 +365,7 @@ class SegmentQTL:
     def calculate_associations(self):
         start = time.time()
 
-        limit = self.quan.shape[0]  # For testing, use small number, eg. 3
+        limit = 5  # self.quan.shape[0]  # For testing, use small number, eg. 3
 
         # Set the start method to 'spawn' for multiprocessing.Pool
         mp.set_start_method("spawn")
@@ -403,28 +408,88 @@ def main():
     with open("elapsed_times.txt", "a") as f:
         # Loop over chromosomes
         for chr in [22]:  # range(1, 23):  # range(1, 22) will loop over 1 to 21
-            # Format file paths
-            copynumber_file = "segmentQTL_inputs/copynumber.csv"
-            quantifications_file = "segmentQTL_inputs/quantifications.csv"
-            covariates_file = "segmentQTL_inputs/covariates.csv"
-            ascat_file = "segmentQTL_inputs/ascat.csv"
-            genotypes_file = f"segmentQTL_inputs/genotypes/chr{chr}_adjusted.csv"
+            parser = argparse.ArgumentParser(description="Perform QTL cis-mapping")
+            parser.add_argument(
+                "--mode",
+                type=str,
+                default="perm",
+                help="Nominal (nominal) or permutation (perm) mapping",
+            )
+            parser.add_argument(
+                "--chromosome",
+                type=str,
+                default="22",
+                help="Chromosome number or X with or without chr prefix",
+            )
+            parser.add_argument(
+                "--copynumber",
+                type=str,
+                default="segmentQTL_inputs/copynumber.csv",
+                help="Path to copynumber CSV file",
+            )
+            parser.add_argument(
+                "--quantifications",
+                type=str,
+                default="segmentQTL_inputs/quantifications.csv",
+                help="Path to quantifications CSV file",
+            )
+            parser.add_argument(
+                "--covariates",
+                type=str,
+                default="segmentQTL_inputs/covariates.csv",
+                help="Path to covariates CSV file",
+            )
+            parser.add_argument(
+                "--segmentation",
+                type=str,
+                default="segmentQTL_inputs/ascat.csv",
+                help="Path to file with segmentation data",
+            )
+            parser.add_argument(
+                "--genotypes",
+                type=str,
+                default="segmentQTL_inputs/genotypes",
+                help="Path to genotypes directory",
+            )
+            parser.add_argument(
+                "--num_permutations",
+                type=int,
+                default=100,
+                help="Number of permutations to be run on each phenotype",
+            )
+
+            args = parser.parse_args()
+
+            chromosome = args.chromosome
+            if not chromosome.startswith("chr"):
+                chromosome = "chr" + chromosome
+
+            mode = args.mode
+            copynumber_file = args.copynumber
+            quantifications_file = args.quantifications
+            covariates_file = args.covariates
+            ascat_file = args.segmentation
+            genotypes_file = f"{args.genotypes}/{chromosome}.csv"
+            num_permutations = args.num_permutations
 
             # Call SegmentQTL and measure elapsed time
             mapping, elapsed_time = SegmentQTL(
                 f"chr{chr}",
+                mode,
                 copynumber_file,
                 quantifications_file,
                 covariates_file,
                 ascat_file,
                 genotypes_file,
+                num_permutations,
             ).calculate_associations()
 
-            mapping["chr"] = chr
+            mapping["chr"] = chromosome
 
             # Save elapsed time to text file
-            f.write(f"Elapsed time for chr{chr}: {elapsed_time} minutes\n")
+            f.write(f"Elapsed time for {chromosome}: {elapsed_time} minutes\n")
 
+            # TODO: Implement taking output file name from command line args
             # Save mapping DataFrame to CSV
             mapping.to_csv(f"test_perm_chr{chr}.csv")
 
