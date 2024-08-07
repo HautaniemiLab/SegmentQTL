@@ -6,6 +6,16 @@ import tensorflow_probability as tfp
 
 
 def calculate_beta_parameters(perm_p_values):
+    """
+    Calculate beta parameters for the array of p-value obtained from permutations.
+
+    Parameters:
+    - perm_p_values: Array of permutation p-values
+
+    Returns:
+    - beta_shape1: Beta parameter 1
+    - beta_shape2: Beta parameter 2
+    """
     if perm_p_values is None or len(perm_p_values) == 0:
         return np.nan, np.nan
 
@@ -23,6 +33,17 @@ def calculate_beta_parameters(perm_p_values):
 
 
 def adjust_p_values(nominal_p_value, beta_shape1, beta_shape2):
+    """
+    Adjust p-values for multiple comparisons.
+
+    Parameters:
+    - nominal_p_value: The p-value from nominal pass
+    - beta_shape1: Beta parameter 1
+    - beta_shape2: Beta parameter 2
+
+    Returns:
+    - Adjusted p-values
+    """
     if np.isnan(nominal_p_value) or np.isnan(beta_shape1) or np.isnan(beta_shape2):
         return np.nan
 
@@ -37,6 +58,18 @@ def adjust_p_values(nominal_p_value, beta_shape1, beta_shape2):
 
 
 def ols_reg_loglike(X, Y, R2_value=False):
+    """
+    Ordinary least square regression and log-likelihood calculation. Optionally calculate the R2-value
+
+    Parameters:
+    - X: The dependent variables with the intercept term
+    - Y: The independent variable
+    - R2_value: Whether to calculate the R2-value, default false
+
+    Returns:
+    - log-likelihood of the model
+    - (Optionally) R2-value
+    """
     n = len(Y)
 
     # Convert to TensorFlow tensors
