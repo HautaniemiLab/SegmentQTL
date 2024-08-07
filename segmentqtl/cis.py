@@ -55,12 +55,32 @@ class Cis:
         else:
             self.num_permutations = num_permutations
 
-    def start_end_gene_segment(self, gene_index):
-        seg_start = self.quan["start"].iloc[gene_index] - 500000
-        seg_end = self.quan["end"].iloc[gene_index] + 500000
-        return [seg_start, seg_end]
+    def start_end_gene_window(self, gene_index):
+        """
+        Find position of the window of a given gene.
 
-    def get_variants_for_gene_segment(self, current_start, current_end):
+        Parameters:
+        - gene_index: Index of the desired gene on the quantification file
+
+        Returns:
+        - Tuple of window_start and window_end, which define the start and end positions of the window
+        """
+        window_start = self.quan["start"].iloc[gene_index] - 500000
+        window_end = self.quan["end"].iloc[gene_index] + 500000
+        return [window_start, window_end]
+
+    def get_variants_for_gene_window(self, current_start, current_end):
+        """
+        Find all the variants inside a window of a gene.
+
+        Parameters:
+        - current_start: Start position of a window
+        - current_end: End position of a window
+
+        Returns:
+        - variants: Subset of genotype dataframe that contains only those variants that are inside
+            the given window
+        """
         positions = self.genotype.index.str.extract(
             r"chr(?:[1-9]|1[0-9]|2[0-2]|X):(\d+):", expand=False
         ).astype(int)
@@ -69,6 +89,20 @@ class Cis:
         return variants
 
     def gene_variants_common_segment(self, start, end, variants):
+        """
+        Filter variants to ensure that the gene and variants that are in the same
+        window are also on a same segment - honoring premise of physical
+        contact in cis-mapping.
+
+        Parameters:
+        - start: Start position of a window
+        - end: End position of a window
+        - variants: Subset of genotype file. Only variants that are in the same window as
+            the gene of interest
+
+        Returns:
+        - variants: Subset of genotype dataframe that is filtered and masked by segmentation and window.
+        """
         start += 500000
         end -= 500000
 
@@ -101,6 +135,19 @@ class Cis:
         return variants
 
     def gene_variant_regressions_permutations(self, gene_index, transf_variants):
+        """
+        Perform permutations to obtain adjusted p-values. In case of 0 permutations,
+        do only nominal pass.
+
+        Parameters:
+        - gene_index: Index of a gene of interest on the quantification file.
+        - transf_variants: Dataframe of transformed variants that are processed for
+            window and segmentation.
+
+        Returns:
+        - actual_associations: Dataframe of association testing results for a gene.
+            When > 0 permutations are used, also adjusted p-values are provided.
+        """
         # Perform nominal association testing for the actual data
         actual_associations = self.gene_variant_regressions(
             gene_index, transf_variants, self.quan
@@ -139,6 +186,20 @@ class Cis:
         return actual_associations
 
     def best_variant_data(self, gene_index, transf_variants, quantifications):
+        """
+        Find variant and linked data for a gene that has strongest Pearson
+        correlation with the independent variable.
+
+        Parameters:
+        - gene_index: Index of a gene of interest on the quantification file.
+        - transf_variants: Dataframe of transformed variants that are processed for
+            window and segmentation.
+        - quantifications: Dataframe of quantifications.
+
+        Returns:
+        - best_variant: Id of the variant with strongest correlation
+        - data_best_corr: Dataframe of data linked with the chosen variant
+        """
         current_gene = quantifications.index[gene_index]
         GEX = pd.to_numeric(
             quantifications.iloc[gene_index, 3:], errors="coerce"
@@ -207,6 +268,20 @@ class Cis:
         return best_variant, data_best_corr
 
     def gene_variant_regressions(self, gene_index, transf_variants, quantifications):
+        """
+        Find associations between the gene expression values of a gene and variants
+        by performing regressions. Using ordinary least square regression,
+        log-likelihood calculations, and likelihood ratio test to pinpoint the effect of genotypes.
+
+        Parameters:
+        - gene_index: Index of a gene of interest on the quantification file.
+        - transf_variants: Dataframe of transformed variants that are processed for
+            window and segmentation.
+        - quantifications: Dataframe of quantifications.
+
+        Returns:
+        - associations dataframe with statistics of the strenghts of associations
+        """
         associations = []
         current_gene = quantifications.index[gene_index]
         best_variant, data_best_corr = self.best_variant_data(
@@ -285,6 +360,19 @@ class Cis:
         return pd.DataFrame(associations)
 
     def calculate_associations(self):
+        """
+        Calculate associations for gene indices using multiprocessing.
+
+        Steps:
+        1. Initializes the multiprocessing pool with the specified number of cores.
+        2. Maps gene indices to the helper function using the pool.
+        3. Closes the pool and waits for the processes to complete.
+        4. Concatenates the resulting DataFrames from each process into one DataFrame.
+
+        Returns:
+        - full_associations: A concatenated dataframe containing the association results
+            for all gene indices.
+        """
         start = time.time()
 
         limit = 5  # self.quan.shape[0]  # For testing, use small number, eg. 3
@@ -309,11 +397,26 @@ class Cis:
         return pd.concat(full_associations)
 
     def calculate_associations_helper(self, gene_index):
+        """
+        Helper function to calculate associations for a single gene index.
+
+        This function performs several steps to calculate the associations for a
+        specific gene index:
+        1. Prints the current progress of the calculation.
+        2. Determines the start and end positions for the gene window.
+        3. Retrieves the variants within the gene window.
+        4. Transforms the variants based on a common segment.
+        5. Performs regressions to calculate associations.
+
+        Parameters:
+        - gene_index (int): The index of the gene for which associations are being calculated.
+
+        Returns:
+        - cur_associations: A dataframe containing the association results for the specified gene index.
+        """
         print(gene_index + 1, "/", self.quan.shape[0])
-        current_start, current_end = self.start_end_gene_segment(gene_index)
-        current_variants = self.get_variants_for_gene_segment(
-            current_start, current_end
-        )
+        current_start, current_end = self.start_end_gene_window(gene_index)
+        current_variants = self.get_variants_for_gene_window(current_start, current_end)
 
         transf_variants = self.gene_variants_common_segment(
             current_start, current_end, current_variants
