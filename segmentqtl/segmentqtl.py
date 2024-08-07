@@ -85,7 +85,7 @@ def main():
     num_cores = args.num_cores
     out_dir = args.out_dir
 
-    # Call SegmentQTL
+    # Perform cis-mapping, nominal or with permutations
     mapping = Cis(
         chromosome,
         mode,
@@ -104,7 +104,7 @@ def main():
         os.makedirs(out_dir)
 
     # Save mapping DataFrame to CSV
-    mapping.to_csv(f"{out_dir}{mode}_{chromosome}.csv")
+    mapping.to_csv(f"{out_dir}{mode}_{chromosome}.csv", index=False)
 
 
 if __name__ == "__main__":
