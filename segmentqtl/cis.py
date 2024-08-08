@@ -6,12 +6,13 @@ import time
 import numpy as np
 import pandas as pd
 import torch
+from torch.distributions import Chi2
+
 from statistical_utils import (
     adjust_p_values,
     calculate_beta_parameters,
     ols_reg_loglike,
 )
-from torch.distributions import Chi2
 
 
 class Cis:
@@ -148,9 +149,14 @@ class Cis:
         - actual_associations: Dataframe of association testing results for a gene.
             When > 0 permutations are used, also adjusted p-values are provided.
         """
+
+        best_variant, data_best_corr = self.best_variant_data(
+            gene_index, transf_variants, self.quan
+        )
+
         # Perform nominal association testing for the actual data
         actual_associations = self.gene_variant_regressions(
-            gene_index, transf_variants, self.quan
+            gene_index, self.quan, best_variant, data_best_corr
         )
 
         if self.num_permutations == 0:
@@ -164,8 +170,11 @@ class Cis:
 
         for index in perm_indices:
             # Perform association testing with the permuted gene index
+            perm_data = self.permutation_data(
+                gene_index, index, transf_variants, best_variant
+            )
             associations = self.gene_variant_regressions(
-                index, transf_variants, self.full_quan
+                index, self.full_quan, "", perm_data
             )
 
             # Store the results of the permutation
@@ -184,6 +193,63 @@ class Cis:
         actual_associations["p_adj"] = adjusted_p_values
 
         return actual_associations
+
+    def permutation_data(self, gene_index, perm_index, transf_variants, best_variant):
+        if not best_variant:
+            return pd.DataFrame()
+
+        # Gene expression levels from the perm index
+        GEX = pd.to_numeric(self.full_quan.iloc[perm_index, 3:], errors="coerce").values
+
+        current_gene = self.quan.index[gene_index]
+        CN = self.copy_number_df.loc[current_gene].values.flatten()
+        cov_values = [
+            pd.to_numeric(self.cov.loc[covariate], errors="coerce").values.flatten()
+            for covariate in self.cov.index
+        ]
+
+        cur_genotypes = transf_variants.loc[best_variant]
+
+        # Check for shape mismatch
+        lengths = [len(GEX), len(CN), len(cur_genotypes)] + [
+            len(cov_value) for cov_value in cov_values
+        ]
+        if len(set(lengths)) != 1:
+            return pd.DataFrame()  # Skip this variant if lengths do not match
+
+        # Filter out rows with NaNs in any of the required columns
+        mask = ~np.isnan(GEX) & ~np.isnan(CN) & ~np.isnan(cur_genotypes)
+        for cov_value in cov_values:
+            mask &= ~np.isnan(cov_value)
+
+        # Apply mask to all columns
+        if np.sum(mask) < 2:  # If less than 2 valid rows, skip this variant
+            return pd.DataFrame()
+
+        GEX_filtered = GEX[mask]
+        CN_filtered = CN[mask]
+        cur_genotypes_filtered = cur_genotypes[mask]
+        cov_values_filtered = [cov_value[mask] for cov_value in cov_values]
+
+        # Ensure each column has more than one unique value
+        if (
+            len(np.unique(GEX_filtered)) < 2
+            or len(np.unique(cur_genotypes_filtered)) < 2
+        ):
+            return pd.DataFrame()
+
+        data_dict = {
+            "GEX": GEX_filtered,
+            "CN": CN_filtered,
+            "cur_genotypes": cur_genotypes_filtered,
+        }
+
+        for covariate, cov_value_filtered in zip(self.cov.index, cov_values_filtered):
+            data_dict[covariate] = cov_value_filtered
+
+        perm_data = pd.DataFrame(data_dict)
+
+        return perm_data
 
     def best_variant_data(self, gene_index, transf_variants, quantifications):
         """
@@ -267,7 +333,13 @@ class Cis:
 
         return best_variant, data_best_corr
 
-    def gene_variant_regressions(self, gene_index, transf_variants, quantifications):
+    def gene_variant_regressions(
+        self,
+        gene_index: int,
+        quantifications: pd.DataFrame,
+        best_variant: str,
+        data_best_corr: pd.DataFrame,
+    ):
         """
         Find associations between the gene expression values of a gene and variants
         by performing regressions. Using ordinary least square regression,
@@ -275,8 +347,6 @@ class Cis:
 
         Parameters:
         - gene_index: Index of a gene of interest on the quantification file.
-        - transf_variants: Dataframe of transformed variants that are processed for
-            window and segmentation.
         - quantifications: Dataframe of quantifications.
 
         Returns:
@@ -284,9 +354,9 @@ class Cis:
         """
         associations = []
         current_gene = quantifications.index[gene_index]
-        best_variant, data_best_corr = self.best_variant_data(
-            gene_index, transf_variants, quantifications
-        )
+        # best_variant, data_best_corr = self.best_variant_data(
+        #    gene_index, transf_variants, quantifications
+        # )
 
         def create_association(
             gene,
@@ -307,7 +377,7 @@ class Cis:
                 "pr_over_chi_squared": pr_over_chi_squared,
             }
 
-        if data_best_corr.empty:
+        if len(data_best_corr) == 0:
             associations.append(
                 create_association(
                     current_gene, best_variant, np.nan, np.nan, np.nan, np.nan, np.nan
@@ -375,7 +445,7 @@ class Cis:
         """
         start = time.time()
 
-        limit = 5  # self.quan.shape[0]  # For testing, use small number, eg. 3
+        limit = 10  # self.quan.shape[0]  # For testing, use small number, eg. 3
 
         # Set the start method to 'spawn' for multiprocessing.Pool
         mp.set_start_method("spawn")
