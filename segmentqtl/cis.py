@@ -56,7 +56,7 @@ class Cis:
         else:
             self.num_permutations = num_permutations
 
-    def start_end_gene_window(self, gene_index):
+    def start_end_gene_window(self, gene_index: int):
         """
         Find position of the window of a given gene.
 
@@ -70,7 +70,7 @@ class Cis:
         window_end = self.quan["end"].iloc[gene_index] + 500000
         return [window_start, window_end]
 
-    def get_variants_for_gene_window(self, current_start, current_end):
+    def get_variants_for_gene_window(self, current_start: int, current_end: int):
         """
         Find all the variants inside a window of a gene.
 
@@ -89,7 +89,9 @@ class Cis:
         variants = self.genotype.loc[subset_condition]
         return variants
 
-    def gene_variants_common_segment(self, start, end, variants):
+    def gene_variants_common_segment(
+        self, start: int, end: int, variants: pd.DataFrame
+    ):
         """
         Filter variants to ensure that the gene and variants that are in the same
         window are also on a same segment - honoring premise of physical
@@ -135,7 +137,9 @@ class Cis:
 
         return variants
 
-    def gene_variant_regressions_permutations(self, gene_index, transf_variants):
+    def gene_variant_regressions_permutations(
+        self, gene_index: int, transf_variants: pd.DataFrame
+    ):
         """
         Perform permutations to obtain adjusted p-values. In case of 0 permutations,
         do only nominal pass.
@@ -194,7 +198,13 @@ class Cis:
 
         return actual_associations
 
-    def permutation_data(self, gene_index, perm_index, transf_variants, best_variant):
+    def permutation_data(
+        self,
+        gene_index: int,
+        perm_index: int,
+        transf_variants: pd.DataFrame,
+        best_variant: str,
+    ):
         if not best_variant:
             return pd.DataFrame()
 
@@ -215,7 +225,7 @@ class Cis:
             len(cov_value) for cov_value in cov_values
         ]
         if len(set(lengths)) != 1:
-            return pd.DataFrame()  # Skip this variant if lengths do not match
+            return pd.DataFrame()
 
         # Filter out rows with NaNs in any of the required columns
         mask = ~np.isnan(GEX) & ~np.isnan(CN) & ~np.isnan(cur_genotypes)
@@ -251,7 +261,12 @@ class Cis:
 
         return perm_data
 
-    def best_variant_data(self, gene_index, transf_variants, quantifications):
+    def best_variant_data(
+        self,
+        gene_index: int,
+        transf_variants: pd.DataFrame,
+        quantifications: pd.DataFrame,
+    ):
         """
         Find variant and linked data for a gene that has strongest Pearson
         correlation with the independent variable.
@@ -297,7 +312,8 @@ class Cis:
                 mask &= ~np.isnan(cov_value)
 
             # Apply mask to all columns
-            if np.sum(mask) < 2:  # If less than 2 valid rows, skip this variant
+            # TODO: Test which threshold to use
+            if np.sum(mask) < 20:  # If less than 20 valid rows, skip this variant
                 continue
 
             GEX_filtered = GEX[mask]
@@ -398,7 +414,6 @@ class Cis:
         likelihood_ratio_stat = -2 * (loglike_nested - loglike_res)
 
         if np.isnan(likelihood_ratio_stat) or likelihood_ratio_stat.numpy() < 0:
-            print("Likelihood ratio nan:", current_gene)
             associations.append(
                 create_association(
                     current_gene, best_variant, np.nan, np.nan, np.nan, np.nan, np.nan
@@ -445,7 +460,7 @@ class Cis:
         """
         start = time.time()
 
-        limit = 10  # self.quan.shape[0]  # For testing, use small number, eg. 3
+        limit = self.quan.shape[0]  # For testing, use small number, eg. 3
 
         # Set the start method to 'spawn' for multiprocessing.Pool
         mp.set_start_method("spawn")
@@ -466,7 +481,7 @@ class Cis:
         # Concatenate the list of DataFrames into one DataFrame
         return pd.concat(full_associations)
 
-    def calculate_associations_helper(self, gene_index):
+    def calculate_associations_helper(self, gene_index: int):
         """
         Helper function to calculate associations for a single gene index.
 
