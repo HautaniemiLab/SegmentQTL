@@ -94,8 +94,7 @@ class Cis:
     ):
         """
         Filter variants to ensure that the gene and variants that are in the same
-        window are also on a same segment - honoring premise of physical
-        contact in cis-mapping.
+        window are also on a same segment
 
         Parameters:
         - start: Start position of a window
@@ -163,6 +162,8 @@ class Cis:
             gene_index, self.quan, best_variant, data_best_corr
         )
 
+        # TODO: Possibly add plotting here?
+
         if self.num_permutations == 0:
             return actual_associations
 
@@ -205,6 +206,22 @@ class Cis:
         transf_variants: pd.DataFrame,
         best_variant: str,
     ):
+        """
+        Find data for association testing for permutations. In this case all
+        dependent variable values are fixed, only the phenotype levels are
+        permuted.
+
+        Parameters:
+        - gene_index: Index of the actual gene on the quantification file.
+        - perm_index: Index of a gene on the quantification file that is used for permutation.
+        - transf_variants: Dataframe of transformed variants that are processed for
+            window and segmentation.
+        - best_variant: ID of the variant that has strongest correlation to the
+            actual gene (not permuted)
+
+        Returns:
+        - perm_data: Dataframe of data linked with the fixed variant and permuted gene
+        """
         if not best_variant:
             return pd.DataFrame()
 
@@ -231,10 +248,6 @@ class Cis:
         mask = ~np.isnan(GEX) & ~np.isnan(CN) & ~np.isnan(cur_genotypes)
         for cov_value in cov_values:
             mask &= ~np.isnan(cov_value)
-
-        # Apply mask to all columns
-        if np.sum(mask) < 2:  # If less than 2 valid rows, skip this variant
-            return pd.DataFrame()
 
         GEX_filtered = GEX[mask]
         CN_filtered = CN[mask]
@@ -313,7 +326,7 @@ class Cis:
 
             # Apply mask to all columns
             # TODO: Test which threshold to use
-            if np.sum(mask) < 20:  # If less than 20 valid rows, skip this variant
+            if np.sum(mask) < 30:  # If less than 20 valid rows, skip this variant
                 continue
 
             GEX_filtered = GEX[mask]
@@ -326,6 +339,21 @@ class Cis:
                 len(np.unique(GEX_filtered)) < 2
                 or len(np.unique(cur_genotypes_filtered)) < 2
             ):
+                continue
+
+            bins = [0, 0.34, 0.67, 1]
+            genotype_groups = pd.cut(
+                cur_genotypes_filtered, bins=bins, include_lowest=True
+            )
+            group_counts = genotype_groups.value_counts()
+
+            # Check if all groups have enough members
+            # TODO: Which threshold?
+            threshold = 10  # Minimum number of members required for each group
+
+            # Check that there is enough variation in genotypes to examine the
+            # differences imposed by different genotypes on phenotype levels
+            if all(group_counts < threshold):
                 continue
 
             # Calculate Pearson correlation
@@ -364,15 +392,14 @@ class Cis:
         Parameters:
         - gene_index: Index of a gene of interest on the quantification file.
         - quantifications: Dataframe of quantifications.
+        - best_variant: The ID of the variant whose genotypes have the strongest correlation to phenotype levels
+        - data_best_corr: The data associated with the best_variant
 
         Returns:
         - associations dataframe with statistics of the strenghts of associations
         """
         associations = []
         current_gene = quantifications.index[gene_index]
-        # best_variant, data_best_corr = self.best_variant_data(
-        #    gene_index, transf_variants, quantifications
-        # )
 
         def create_association(
             gene,
