@@ -25,6 +25,7 @@ class Cis:
         covariates,
         segmentation,
         genotype,
+        all_variants_mode,
         num_permutations,
         num_cores,
     ):
@@ -48,6 +49,8 @@ class Cis:
         self.genotype = pd.read_csv(genotype, index_col=0)
         self.genotype = self.genotype.loc[:, self.genotype.columns.isin(self.samples)]
         self.genotype = self.genotype[self.samples]
+
+        self.all_variants_mode = all_variants_mode
 
         self.num_cores = num_cores
 
@@ -137,7 +140,11 @@ class Cis:
         return variants
 
     def gene_variant_regressions_permutations(
-        self, gene_index: int, transf_variants: pd.DataFrame
+        self,
+        gene_index: int,
+        transf_variants: pd.DataFrame,
+        variant: str,
+        regression_data: pd.DataFrame,
     ):
         """
         Perform permutations to obtain adjusted p-values. In case of 0 permutations,
@@ -153,13 +160,13 @@ class Cis:
             When > 0 permutations are used, also adjusted p-values are provided.
         """
 
-        best_variant, data_best_corr = self.best_variant_data(
-            gene_index, transf_variants, self.quan
-        )
+        # best_variant, data_best_corr = self.best_variant_data(
+        #    gene_index, transf_variants, self.quan
+        # )
 
         # Perform nominal association testing for the actual data
         actual_associations = self.gene_variant_regressions(
-            gene_index, self.quan, best_variant, data_best_corr
+            gene_index, self.quan, variant, regression_data
         )
 
         # TODO: Possibly add plotting here?
@@ -176,7 +183,7 @@ class Cis:
         for index in perm_indices:
             # Perform association testing with the permuted gene index
             perm_data = self.permutation_data(
-                gene_index, index, transf_variants, best_variant
+                gene_index, index, transf_variants, variant
             )
             associations = self.gene_variant_regressions(
                 index, self.full_quan, "", perm_data
@@ -274,6 +281,40 @@ class Cis:
 
         return perm_data
 
+    def check_data(self, GEX_filtered, cur_genotypes_filtered):
+        # Ensure each column has more than one unique value
+        if (
+            len(np.unique(GEX_filtered)) < 2
+            or len(np.unique(cur_genotypes_filtered)) < 2
+        ):
+            return False
+
+        bins = [0, 0.34, 0.67, 1]
+        genotype_groups = pd.cut(cur_genotypes_filtered, bins=bins, include_lowest=True)
+        group_counts = genotype_groups.value_counts()
+
+        # TODO: Which threshold?
+        threshold = 10  # Minimum number of group members
+
+        # Check that there is enough variation in genotypes to examine the
+        # differences imposed by different genotypes on phenotype levels
+        # if all(group_counts < threshold):
+        #    return False
+
+        # Ensure that the groups are sorted by bin intervals
+        # TODO: Check that this is safe to omit
+        # sorted_group_counts = group_counts.sort_index()
+
+        # Check if the first and third groups are > threshold and second group > threshold
+        if (
+            group_counts.iloc[0] < threshold
+            or group_counts.iloc[2] < threshold
+            or group_counts.iloc[1] < threshold
+        ):
+            return False
+
+        return True
+
     def best_variant_data(
         self,
         gene_index: int,
@@ -324,37 +365,19 @@ class Cis:
             for cov_value in cov_values:
                 mask &= ~np.isnan(cov_value)
 
-            # Apply mask to all columns
             # TODO: Test which threshold to use
-            if np.sum(mask) < 30:  # If less than 20 valid rows, skip this variant
+            if np.sum(mask) < 30:  # If less than 30 valid rows, skip this variant
                 continue
 
+            # Apply mask to all columns
             GEX_filtered = GEX[mask]
             CN_filtered = CN[mask]
             cur_genotypes_filtered = cur_genotypes[mask]
             cov_values_filtered = [cov_value[mask] for cov_value in cov_values]
 
-            # Ensure each column has more than one unique value
-            if (
-                len(np.unique(GEX_filtered)) < 2
-                or len(np.unique(cur_genotypes_filtered)) < 2
-            ):
-                continue
-
-            bins = [0, 0.34, 0.67, 1]
-            genotype_groups = pd.cut(
-                cur_genotypes_filtered, bins=bins, include_lowest=True
-            )
-            group_counts = genotype_groups.value_counts()
-
-            # Check if all groups have enough members
-            # TODO: Which threshold?
-            threshold = 10  # Minimum number of members required for each group
-
-            # Check that there is enough variation in genotypes to examine the
-            # differences imposed by different genotypes on phenotype levels
-            if all(group_counts < threshold):
-                continue
+            # TODO: verify that this works as intended
+            if not self.check_data(GEX_filtered, cur_genotypes_filtered):
+                return data_best_corr
 
             # Calculate Pearson correlation
             corr = np.corrcoef(GEX_filtered, cur_genotypes_filtered)[0, 1]
@@ -376,6 +399,70 @@ class Cis:
                 best_variant = variant_index
 
         return best_variant, data_best_corr
+
+    def data_all_variants(self, GEX, CN, cov_values, cur_genotypes):
+        data_all_variants = pd.DataFrame()
+
+        # Check for shape mismatch
+        lengths = [len(GEX), len(CN), len(cur_genotypes)] + [
+            len(cov_value) for cov_value in cov_values
+        ]
+        if len(set(lengths)) != 1:
+            return data_all_variants  # Skip this variant if lengths do not match
+
+        # Filter out rows with NaNs in any of the required columns
+        mask = ~np.isnan(GEX) & ~np.isnan(CN) & ~np.isnan(cur_genotypes)
+        for cov_value in cov_values:
+            mask &= ~np.isnan(cov_value)
+
+        # TODO: Test which threshold to use
+        if np.sum(mask) < 30:  # If less than 30 valid rows, skip this variant
+            return data_all_variants
+
+        # Apply mask to all columns
+        GEX_filtered = GEX[mask]
+        CN_filtered = CN[mask]
+        cur_genotypes_filtered = cur_genotypes[mask]
+        cov_values_filtered = [cov_value[mask] for cov_value in cov_values]
+
+        if not self.check_data(GEX_filtered, cur_genotypes_filtered):
+            return data_all_variants
+
+        data_dict = {
+            "GEX": GEX_filtered,
+            "CN": CN_filtered,
+            "cur_genotypes": cur_genotypes_filtered,
+        }
+
+        for covariate, cov_value_filtered in zip(self.cov.index, cov_values_filtered):
+            data_dict[covariate] = cov_value_filtered
+
+        data_all_variants = pd.DataFrame(data_dict)
+
+        return data_all_variants
+
+    def process_all_variants(self, gene_index, transf_variants):
+        current_gene = self.quan.index[gene_index]
+        GEX = pd.to_numeric(self.quan.iloc[gene_index, 3:], errors="coerce").values
+        CN = self.copy_number_df.loc[current_gene].values.flatten()
+
+        cov_values = [
+            pd.to_numeric(self.cov.loc[covariate], errors="coerce").values.flatten()
+            for covariate in self.cov.index
+        ]
+
+        df_res_list = []
+
+        for variant_index, cur_genotypes in zip(
+            transf_variants.index, transf_variants.values
+        ):
+            regression_data = self.data_all_variants(GEX, CN, cov_values, cur_genotypes)
+            perm_res = self.gene_variant_regressions_permutations(
+                gene_index, transf_variants, variant_index, regression_data
+            )
+            df_res_list.append(perm_res)
+
+        return pd.concat(df_res_list, ignore_index=True)
 
     def gene_variant_regressions(
         self,
@@ -487,7 +574,7 @@ class Cis:
         """
         start = time.time()
 
-        limit = self.quan.shape[0]  # For testing, use small number, eg. 3
+        limit = 3  # self.quan.shape[0]  # For testing, use small number, eg. 3
 
         # Set the start method to 'spawn' for multiprocessing.Pool
         mp.set_start_method("spawn")
@@ -524,7 +611,7 @@ class Cis:
         - gene_index (int): The index of the gene for which associations are being calculated.
 
         Returns:
-        - cur_associations: A dataframe containing the association results for the specified gene index.
+        - A dataframe containing the association results for the specified gene index.
         """
         print(gene_index + 1, "/", self.quan.shape[0])
         current_start, current_end = self.start_end_gene_window(gene_index)
@@ -534,8 +621,13 @@ class Cis:
             current_start, current_end, current_variants
         )
 
-        cur_associations = self.gene_variant_regressions_permutations(
-            gene_index, transf_variants
-        )
+        if self.all_variants_mode:
+            return self.process_all_variants(gene_index, transf_variants)
+        else:
+            best_variant, data_best_corr = self.best_variant_data(
+                gene_index, transf_variants, self.quan
+            )
 
-        return cur_associations
+            return self.gene_variant_regressions_permutations(
+                gene_index, transf_variants, best_variant, data_best_corr
+            )

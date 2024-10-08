@@ -17,7 +17,7 @@ def main():
     parser.add_argument(
         "--chromosome",
         type=str,
-        default="22",
+        default="21",
         help="Chromosome number or X with or without chr prefix",
     )
     parser.add_argument(
@@ -41,7 +41,7 @@ def main():
     parser.add_argument(
         "--segmentation",
         type=str,
-        default="../segmentQTL_inputs/ascat.csv",
+        default="../segmentQTL_inputs/purple.csv",
         help="Path to file with segmentation data",
     )
     parser.add_argument(
@@ -51,15 +51,20 @@ def main():
         help="Path to genotypes directory",
     )
     parser.add_argument(
+        "--all_variants",
+        action="store_true",
+        help="Test all applicable variants per gene instead of only the best correlated one",
+    )
+    parser.add_argument(
         "--num_permutations",
         type=int,
-        default=100,
+        default=10,
         help="Number of permutations to be run on each phenotype",
     )
     parser.add_argument(
         "--num_cores",
         type=int,
-        default=5,
+        default=1,
         help="Number of cores to be used in the computation",
     )
     parser.add_argument(
@@ -80,7 +85,8 @@ def main():
     quantifications_file = args.quantifications
     covariates_file = args.covariates
     segmentation_file = args.segmentation
-    genotypes_file = f"{args.genotypes}/{chromosome}.csv"
+    genotypes_file = f"{args.genotypes}/{chromosome}_with_id.csv"
+    all_variants_mode = args.all_variants
     num_permutations = args.num_permutations
     num_cores = args.num_cores
     out_dir = args.out_dir
@@ -94,6 +100,7 @@ def main():
         covariates_file,
         segmentation_file,
         genotypes_file,
+        all_variants_mode,
         num_permutations,
         num_cores,
     ).calculate_associations()
@@ -104,7 +111,7 @@ def main():
         os.makedirs(out_dir)
 
     # Save mapping DataFrame to CSV
-    mapping.to_csv(f"{out_dir}{mode}_{chromosome}.csv", index=False)
+    mapping.to_csv(f"{out_dir}{mode}_{chromosome}_{num_permutations}.csv", index=False)
 
 
 if __name__ == "__main__":
