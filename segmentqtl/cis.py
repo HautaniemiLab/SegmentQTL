@@ -244,28 +244,11 @@ class Cis:
 
         cur_genotypes = transf_variants.loc[best_variant]
 
-        # Check for shape mismatch
-        lengths = [len(GEX), len(CN), len(cur_genotypes)] + [
-            len(cov_value) for cov_value in cov_values
-        ]
-        if len(set(lengths)) != 1:
-            return pd.DataFrame()
+        GEX_filtered, CN_filtered, cur_genotypes_filtered, cov_values_filtered = (
+            self.filter_arrays(GEX, CN, cur_genotypes, cov_values)
+        )
 
-        # Filter out rows with NaNs in any of the required columns
-        mask = ~np.isnan(GEX) & ~np.isnan(CN) & ~np.isnan(cur_genotypes)
-        for cov_value in cov_values:
-            mask &= ~np.isnan(cov_value)
-
-        GEX_filtered = GEX[mask]
-        CN_filtered = CN[mask]
-        cur_genotypes_filtered = cur_genotypes[mask]
-        cov_values_filtered = [cov_value[mask] for cov_value in cov_values]
-
-        # Ensure each column has more than one unique value
-        if (
-            len(np.unique(GEX_filtered)) < 2
-            or len(np.unique(cur_genotypes_filtered)) < 2
-        ):
+        if not any(GEX_filtered):
             return pd.DataFrame()
 
         data_dict = {
@@ -281,14 +264,7 @@ class Cis:
 
         return perm_data
 
-    def check_data(self, GEX_filtered, cur_genotypes_filtered):
-        # Ensure each column has more than one unique value
-        if (
-            len(np.unique(GEX_filtered)) < 2
-            or len(np.unique(cur_genotypes_filtered)) < 2
-        ):
-            return False
-
+    def check_grouping(self, cur_genotypes_filtered):
         bins = [0, 0.34, 0.67, 1]
         genotype_groups = pd.cut(cur_genotypes_filtered, bins=bins, include_lowest=True)
         group_counts = genotype_groups.value_counts()
@@ -314,6 +290,43 @@ class Cis:
             return False
 
         return True
+
+    def filter_arrays(self, GEX, CN, cur_genotypes, cov_values):
+        # Check for shape mismatch
+        lengths = [len(GEX), len(CN), len(cur_genotypes)] + [
+            len(cov_value) for cov_value in cov_values
+        ]
+        if len(set(lengths)) != 1:
+            return [], [], [], []
+
+        # Filter out rows with NaNs in any of the required columns
+        mask = ~np.isnan(GEX) & ~np.isnan(CN) & ~np.isnan(cur_genotypes)
+        for cov_value in cov_values:
+            mask &= ~np.isnan(cov_value)
+
+        # TODO: Test which threshold to use
+        if np.sum(mask) < 30:  # If less than 30 valid rows, skip this variant
+            return [], [], [], []
+
+        # Apply mask to all columns
+        GEX_filtered = GEX[mask]
+        CN_filtered = CN[mask]
+        cur_genotypes_filtered = cur_genotypes[mask]
+        cov_values_filtered = [cov_value[mask] for cov_value in cov_values]
+
+        # Ensure each column has more than one unique value
+        if (
+            len(np.unique(GEX_filtered)) < 2
+            or len(np.unique(CN_filtered)) < 2
+            or len(np.unique(cur_genotypes_filtered)) < 2
+            or len(np.unique(cov_values_filtered)) < 2
+        ):
+            return [], [], [], []
+
+        if not self.check_grouping(cur_genotypes_filtered):
+            return [], [], [], []
+
+        return GEX_filtered, CN_filtered, cur_genotypes_filtered, cov_values_filtered
 
     def best_variant_data(
         self,
@@ -353,31 +366,12 @@ class Cis:
         for variant_index, cur_genotypes in zip(
             transf_variants.index, transf_variants.values
         ):
-            # Check for shape mismatch
-            lengths = [len(GEX), len(CN), len(cur_genotypes)] + [
-                len(cov_value) for cov_value in cov_values
-            ]
-            if len(set(lengths)) != 1:
-                continue  # Skip this variant if lengths do not match
+            GEX_filtered, CN_filtered, cur_genotypes_filtered, cov_values_filtered = (
+                self.filter_arrays(GEX, CN, cur_genotypes, cov_values)
+            )
 
-            # Filter out rows with NaNs in any of the required columns
-            mask = ~np.isnan(GEX) & ~np.isnan(CN) & ~np.isnan(cur_genotypes)
-            for cov_value in cov_values:
-                mask &= ~np.isnan(cov_value)
-
-            # TODO: Test which threshold to use
-            if np.sum(mask) < 30:  # If less than 30 valid rows, skip this variant
+            if not any(GEX_filtered):
                 continue
-
-            # Apply mask to all columns
-            GEX_filtered = GEX[mask]
-            CN_filtered = CN[mask]
-            cur_genotypes_filtered = cur_genotypes[mask]
-            cov_values_filtered = [cov_value[mask] for cov_value in cov_values]
-
-            # TODO: verify that this works as intended
-            if not self.check_data(GEX_filtered, cur_genotypes_filtered):
-                return data_best_corr
 
             # Calculate Pearson correlation
             corr = np.corrcoef(GEX_filtered, cur_genotypes_filtered)[0, 1]
@@ -403,29 +397,11 @@ class Cis:
     def data_all_variants(self, GEX, CN, cov_values, cur_genotypes):
         data_all_variants = pd.DataFrame()
 
-        # Check for shape mismatch
-        lengths = [len(GEX), len(CN), len(cur_genotypes)] + [
-            len(cov_value) for cov_value in cov_values
-        ]
-        if len(set(lengths)) != 1:
-            return data_all_variants  # Skip this variant if lengths do not match
+        GEX_filtered, CN_filtered, cur_genotypes_filtered, cov_values_filtered = (
+            self.filter_arrays(GEX, CN, cur_genotypes, cov_values)
+        )
 
-        # Filter out rows with NaNs in any of the required columns
-        mask = ~np.isnan(GEX) & ~np.isnan(CN) & ~np.isnan(cur_genotypes)
-        for cov_value in cov_values:
-            mask &= ~np.isnan(cov_value)
-
-        # TODO: Test which threshold to use
-        if np.sum(mask) < 30:  # If less than 30 valid rows, skip this variant
-            return data_all_variants
-
-        # Apply mask to all columns
-        GEX_filtered = GEX[mask]
-        CN_filtered = CN[mask]
-        cur_genotypes_filtered = cur_genotypes[mask]
-        cov_values_filtered = [cov_value[mask] for cov_value in cov_values]
-
-        if not self.check_data(GEX_filtered, cur_genotypes_filtered):
+        if not any(GEX_filtered):
             return data_all_variants
 
         data_dict = {
@@ -574,7 +550,7 @@ class Cis:
         """
         start = time.time()
 
-        limit = 3  # self.quan.shape[0]  # For testing, use small number, eg. 3
+        limit = self.quan.shape[0]  # For testing, use small number, eg. 3
 
         # Set the start method to 'spawn' for multiprocessing.Pool
         mp.set_start_method("spawn")
