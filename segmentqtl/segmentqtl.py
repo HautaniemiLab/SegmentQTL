@@ -4,6 +4,7 @@ import argparse
 import os
 
 from cis import Cis
+from fdr_correction import fdr
 
 
 def main():
@@ -73,45 +74,70 @@ def main():
         default="../results/",
         help="Directory where intermediate results are saved",
     )
+    parser.add_argument(
+        "--out",
+        type=str,
+        default="../fdr_corrected_res.csv",
+        help="File path to which fdr corrected full results are saved to. Must be a csv file.",
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.01,
+        help="Threshold value for fdr cutoff.",
+    )
 
     args = parser.parse_args()
 
-    chromosome = args.chromosome
-    if not chromosome.startswith("chr"):
-        chromosome = "chr" + chromosome
+    out_dir = args.out_dir
+    if not out_dir.endswith("/"):
+        out_dir = out_dir + "/"
 
     mode = args.mode
-    copynumber_file = args.copynumber
-    quantifications_file = args.quantifications
-    covariates_file = args.covariates
-    segmentation_file = args.segmentation
-    genotypes_file = f"{args.genotypes}/{chromosome}_with_id.csv"
-    all_variants_mode = args.all_variants
-    num_permutations = args.num_permutations
-    num_cores = args.num_cores
-    out_dir = args.out_dir
+    if mode == "nominal" or mode == "perm":
+        chromosome = args.chromosome
+        if not chromosome.startswith("chr"):
+            chromosome = "chr" + chromosome
 
-    # Perform cis-mapping, nominal or with permutations
-    mapping = Cis(
-        chromosome,
-        mode,
-        copynumber_file,
-        quantifications_file,
-        covariates_file,
-        segmentation_file,
-        genotypes_file,
-        all_variants_mode,
-        num_permutations,
-        num_cores,
-    ).calculate_associations()
+        copynumber_file = args.copynumber
+        quantifications_file = args.quantifications
+        covariates_file = args.covariates
+        segmentation_file = args.segmentation
+        genotypes_file = f"{args.genotypes}/{chromosome}_with_id.csv"
+        all_variants_mode = args.all_variants
+        num_permutations = args.num_permutations
+        num_cores = args.num_cores
 
-    mapping["chr"] = chromosome
+        # Perform cis-mapping, nominal or with permutations
+        mapping = Cis(
+            chromosome,
+            mode,
+            copynumber_file,
+            quantifications_file,
+            covariates_file,
+            segmentation_file,
+            genotypes_file,
+            all_variants_mode,
+            num_permutations,
+            num_cores,
+        ).calculate_associations()
 
-    if not os.path.exists(out_dir):
-        os.makedirs(out_dir)
+        mapping["chr"] = chromosome
 
-    # Save mapping DataFrame to CSV
-    mapping.to_csv(f"{out_dir}{mode}_{chromosome}_{num_permutations}.csv", index=False)
+        if not os.path.exists(out_dir):
+            os.makedirs(out_dir)
+
+        # Save mapping DataFrame to CSV
+        mapping.to_csv(
+            f"{out_dir}{mode}_{chromosome}_{num_permutations}.csv", index=False
+        )
+    elif mode == "fdr":
+        out_path = args.out
+        threshold = args.threshold
+        fdr_corrected_res = fdr(out_dir, threshold)
+        fdr_corrected_res.to_csv(out_path, index=False)
+    else:
+        print("Invalid --mode")
 
 
 if __name__ == "__main__":
