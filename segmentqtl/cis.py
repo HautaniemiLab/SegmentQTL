@@ -273,16 +273,12 @@ class Cis:
         """
         bins = [0, 0.34, 0.67, 1]
         genotype_groups = pd.cut(cur_genotypes_filtered, bins=bins, include_lowest=True)
-        group_counts = genotype_groups.value_counts()
+        group_counts = genotype_groups.value_counts().sort_index()
 
         # TODO: Which threshold?
         threshold = 10  # Minimum number of group members
 
-        # Ensure that the groups are sorted by bin intervals
-        # TODO: Check that this is safe to omit
-        # sorted_group_counts = group_counts.sort_index()
-
-        # Check if the first and third groups are > threshold and second group > threshold
+        # Check tails and middle against threshold
         if (
             group_counts.iloc[0] + group_counts.iloc[2] < threshold
             or group_counts.iloc[1] < threshold
