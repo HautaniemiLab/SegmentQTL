@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 from multiprocessing import Pool, set_start_method
+from os import path
 from time import time
 
 import numpy as np
@@ -31,22 +32,22 @@ class Cis:
     ):
         self.chromosome = chromosome
 
-        self.copy_number_df = pd.read_csv(copynumber, index_col=0)
+        self.copy_number_df = self.load_and_validate_file(copynumber, index_col=0)
 
-        self.full_quan = pd.read_csv(quantifications, index_col=3)
+        self.full_quan = self.load_and_validate_file(quantifications, index_col=3)
         self.quan = self.full_quan[self.full_quan.chr == self.chromosome]
 
         self.samples = self.quan.columns.to_numpy()[3:]
 
-        self.cov = pd.read_csv(covariates)
+        self.cov = self.load_and_validate_file(covariates)
 
-        self.segmentation = pd.read_csv(segmentation, index_col=0)
+        self.segmentation = self.load_and_validate_file(segmentation, index_col=0)
         self.segmentation = self.segmentation[self.segmentation.chr == self.chromosome]
         self.segmentation = self.segmentation[
             self.segmentation.index.isin(self.samples)
         ]
 
-        self.genotype = pd.read_csv(genotype, index_col=0)
+        self.genotype = self.load_and_validate_file(genotype, index_col=0)
         self.genotype = self.genotype.loc[:, self.genotype.columns.isin(self.samples)]
         self.genotype = self.genotype[self.samples]
 
@@ -58,6 +59,29 @@ class Cis:
             self.num_permutations = 0
         else:
             self.num_permutations = num_permutations
+
+    def load_and_validate_file(self, file_path: str, index_col: int):
+        """Load a CSV file and validate its existence and content.
+
+        Parameters:
+        - file_path: Path to file
+
+        Returns:
+        - Dataframe from contents of the CSV file
+
+        Raises:
+        - FileNotFoundError: If the file does not exist at the given path.
+        - ValueError: If the CSV file is empty (i.e., has no rows).
+        """
+        if not path.exists(file_path):
+            raise FileNotFoundError(f"File '{file_path}' not found.")
+
+        df = pd.read_csv(file_path, index_col=index_col)
+
+        if df.shape[0] == 0:
+            raise ValueError(f"File '{file_path}' has no rows.")
+
+        return df
 
     def start_end_gene_window(self, gene_index: int):
         """
