@@ -1,5 +1,5 @@
-import glob
-import os
+from glob import glob
+from os import path
 
 import pandas as pd
 from statsmodels.stats.multitest import multipletests
@@ -7,8 +7,7 @@ from statsmodels.stats.multitest import multipletests
 
 def combine_chromosome(outdir: str):
     """
-    Combine all csv files fro the given directory. In addition, save
-    the combined results as a csv file to the same location.
+    Combine all csv files fro the given directory.
 
     Parameters:
     - outdir: Directory to which the mapping results have been saved.
@@ -16,7 +15,7 @@ def combine_chromosome(outdir: str):
     Returns:
     - combined_df: Dataframe with data from all csv files from the folder.
     """
-    csv_files = glob.glob(os.path.join(outdir, "*.csv"))
+    csv_files = glob(path.join(outdir, "*.csv"))
 
     dfs = []
 
@@ -26,8 +25,6 @@ def combine_chromosome(outdir: str):
 
     combined_df = pd.concat(dfs, ignore_index=True)
     combined_df = combined_df.dropna()
-
-    combined_df.to_csv(f"{outdir}full_result.csv", index=False)
 
     return combined_df
 
@@ -41,7 +38,7 @@ def fdr(outdir: str, threshold: float):
     - threshold: Cutoff value for fdr correction.
 
     Returns:
-    - full_res: Dataframe with all mapping results including a column for fdr corrected p-value.
+    - full_res: Dataframe with all mapping results including a column for fdr corrected p-values.
     """
     full_res = combine_chromosome(outdir)
     perm_pvals = full_res["p_adj"]

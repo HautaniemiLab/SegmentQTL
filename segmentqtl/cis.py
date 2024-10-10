@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
-import multiprocessing as mp
-import time
+from multiprocessing import Pool, set_start_method
+from time import time
 
 import numpy as np
 import pandas as pd
@@ -600,12 +600,12 @@ class Cis:
         - full_associations: A concatenated dataframe containing the association results
             for all gene indices.
         """
-        start = time.time()
+        start = time()
 
         limit = self.quan.shape[0]  # For testing, use small number, eg. 3
 
-        mp.set_start_method("spawn")
-        pool = mp.Pool(processes=self.num_cores)
+        set_start_method("spawn")
+        pool = Pool(processes=self.num_cores)
 
         # Map the gene indices to the helper function using the Pool
         full_associations = pool.map(self.calculate_associations_helper, range(limit))
@@ -613,7 +613,7 @@ class Cis:
         pool.close()
         pool.join()
 
-        end = time.time()
+        end = time()
         print("The time of execution: ", (end - start) / 60, " min")
 
         return pd.concat(full_associations)

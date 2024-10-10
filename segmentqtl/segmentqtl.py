@@ -1,14 +1,14 @@
 #!/usr/bin/env python
 
-import argparse
-import os
+from argparse import ArgumentParser
+from os import makedirs, path
 
 from cis import Cis
 from fdr_correction import fdr
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Perform QTL cis-mapping")
+    parser = ArgumentParser(description="Perform QTL cis-mapping")
     parser.add_argument(
         "--mode",
         type=str,
@@ -103,7 +103,7 @@ def main():
         quantifications_file = args.quantifications
         covariates_file = args.covariates
         segmentation_file = args.segmentation
-        genotypes_file = f"{args.genotypes}/{chromosome}_with_id.csv"
+        genotypes_file = f"{args.genotypes}/{chromosome}.csv"
         all_variants_mode = args.all_variants
         num_permutations = args.num_permutations
         num_cores = args.num_cores
@@ -124,8 +124,8 @@ def main():
 
         mapping["chr"] = chromosome
 
-        if not os.path.exists(out_dir):
-            os.makedirs(out_dir)
+        if not path.exists(out_dir):
+            makedirs(out_dir)
 
         mapping.to_csv(
             f"{out_dir}{mode}_{chromosome}_{num_permutations}.csv", index=False
