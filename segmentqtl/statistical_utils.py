@@ -5,7 +5,7 @@ import tensorflow as tf
 from tensorflow_probability import distributions
 
 
-def calculate_beta_parameters(perm_p_values):
+def calculate_beta_parameters(perm_p_values: np.ndarray):
     """
     Calculate beta parameters for the array of p-value obtained from permutations.
 
@@ -54,7 +54,7 @@ def adjust_p_values(nominal_p_value: float, beta_shape1: float, beta_shape2: flo
     return adjusted_p_value.numpy()
 
 
-def ols_reg_loglike(X, Y, R2_value=False):
+def ols_reg_loglike(X: np.ndarray, Y: np.ndarray, R2_value: bool = False):
     """
     Ordinary least square regression and log-likelihood calculation. Optionally calculate the R2-value
 
