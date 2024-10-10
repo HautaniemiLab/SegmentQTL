@@ -242,7 +242,7 @@ class Cis:
         cur_genotypes = transf_variants.loc[variant]
 
         GEX_filtered, CN_filtered, cur_genotypes_filtered, cov_values_filtered = (
-            self.filter_arrays(GEX, CN, cur_genotypes, cov_values, group_check=False)
+            self.filter_arrays(GEX, CN, cur_genotypes, cov_values)
         )
 
         if not any(GEX_filtered):
@@ -293,7 +293,6 @@ class Cis:
         CN: np.ndarray,
         cur_genotypes: np.ndarray,
         cov_values: np.ndarray,
-        group_check: bool = True,
     ):
         """
         Filter data arrays and do validity checks.
@@ -343,9 +342,8 @@ class Cis:
         ):
             return [], [], [], []
 
-        if group_check:
-            if not self.check_grouping(cur_genotypes_filtered):
-                return [], [], [], []
+        if not self.check_grouping(cur_genotypes_filtered):
+            return [], [], [], []
 
         return GEX_filtered, CN_filtered, cur_genotypes_filtered, cov_values_filtered
 
