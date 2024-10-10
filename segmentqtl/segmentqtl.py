@@ -13,7 +13,7 @@ def main():
         "--mode",
         type=str,
         default="perm",
-        help="Nominal (nominal) or permutation (perm) mapping",
+        help="Nominal (nominal) or permutation (perm) mapping or fdr correction (fdr)",
     )
     parser.add_argument(
         "--chromosome",
@@ -127,7 +127,6 @@ def main():
         if not os.path.exists(out_dir):
             os.makedirs(out_dir)
 
-        # Save mapping DataFrame to CSV
         mapping.to_csv(
             f"{out_dir}{mode}_{chromosome}_{num_permutations}.csv", index=False
         )
@@ -137,7 +136,7 @@ def main():
         fdr_corrected_res = fdr(out_dir, threshold)
         fdr_corrected_res.to_csv(out_path, index=False)
     else:
-        print("Invalid --mode")
+        print(f"Invalid mode: {mode}, please select nominal, perm, or fdr.")
 
 
 if __name__ == "__main__":
