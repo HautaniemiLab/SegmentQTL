@@ -9,6 +9,7 @@ import pandas as pd
 import torch
 from torch.distributions import Chi2
 
+from plotting_utils import box_and_whisker
 from statistical_utils import (
     adjust_p_values,
     calculate_beta_parameters,
@@ -29,6 +30,8 @@ class Cis:
         all_variants_mode,
         num_permutations,
         num_cores,
+        plot_threshold,
+        plot_dir,
     ):
         self.chromosome = chromosome
 
@@ -39,7 +42,8 @@ class Cis:
 
         self.samples = self.quan.columns.to_numpy()[3:]
 
-        self.cov = self.load_and_validate_file(covariates)
+        self.cov = self.load_and_validate_file(covariates, index_col=None)
+        # self.cov = pd.read_csv(covariates)
 
         self.segmentation = self.load_and_validate_file(segmentation, index_col=0)
         self.segmentation = self.segmentation[self.segmentation.chr == self.chromosome]
@@ -55,13 +59,17 @@ class Cis:
 
         self.num_cores = num_cores
 
+        self.plot_threshold = plot_threshold
+        self.plot_dir = plot_dir
+
         if mode == "nominal":
             self.num_permutations = 0
         else:
             self.num_permutations = num_permutations
 
     def load_and_validate_file(self, file_path: str, index_col: int):
-        """Load a CSV file and validate its existence and content.
+        """
+        Load a CSV file and validate its existence and content.
 
         Parameters:
         - file_path: Path to file
@@ -121,7 +129,7 @@ class Cis:
     ):
         """
         Filter variants to ensure that the gene and variants that are in the same
-        window are also on a same segment
+        window are also on a same segment.
 
         Parameters:
         - start: Start position of a window
@@ -216,13 +224,15 @@ class Cis:
 
         perm_p_values = permutations_results["pr_over_chi_squared"].dropna().to_numpy()
         beta_shape1, beta_shape2 = calculate_beta_parameters(perm_p_values)
-        actual_p_value = actual_associations.loc[:, "pr_over_chi_squared"].to_numpy()[0]
+        nominal_p_value = actual_associations.loc[:, "pr_over_chi_squared"].to_numpy()[
+            0
+        ]
 
         # Adjust p-values using beta approximation
-        adjusted_p_values = adjust_p_values(actual_p_value, beta_shape1, beta_shape2)
+        adjusted_p_value = adjust_p_values(nominal_p_value, beta_shape1, beta_shape2)
 
         # Add adjusted p-values to actual associations
-        actual_associations["p_adj"] = adjusted_p_values
+        actual_associations["p_adj"] = adjusted_p_value
 
         return actual_associations
 
@@ -620,7 +630,7 @@ class Cis:
         """
         start = time()
 
-        limit = self.quan.shape[0]  # For testing, use small number, eg. 3
+        limit = 5  # self.quan.shape[0]  # For testing, use small number, eg. 3
 
         set_start_method("spawn")
         pool = Pool(processes=self.num_cores)
@@ -669,6 +679,21 @@ class Cis:
                 gene_index, transf_variants, self.quan
             )
 
-            return self.gene_variant_regressions_permutations(
+            association_res = self.gene_variant_regressions_permutations(
                 gene_index, transf_variants, best_variant, data_best_corr
             )
+
+            if self.plot_threshold != -1:
+                p_value = -1
+                if (self.num_permutations) > 0:
+                    p_value = association_res["p_adj"][0]
+                else:
+                    p_value = association_res["pr_over_chi_squared"][0]
+
+                if not np.isnan(p_value) and p_value < self.plot_threshold:
+                    gene_name = self.quan.index[gene_index]
+                    box_and_whisker(
+                        data_best_corr, gene_name, best_variant, self.plot_dir
+                    )
+
+            return association_res

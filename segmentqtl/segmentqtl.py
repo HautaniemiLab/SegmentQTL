@@ -12,7 +12,7 @@ def main():
     parser.add_argument(
         "--mode",
         type=str,
-        default="perm",
+        default="nominal",
         help="Nominal (nominal) or permutation (perm) mapping or fdr correction (fdr)",
     )
     parser.add_argument(
@@ -86,12 +86,28 @@ def main():
         default=0.01,
         help="Threshold value for fdr cutoff.",
     )
+    parser.add_argument(
+        "--plot_threshold",
+        type=float,
+        default=-1,
+        help="Threshold p-value for creating a plot.",
+    )
+    parser.add_argument(
+        "--plot_dir",
+        type=str,
+        default="../plots/",
+        help="Directory for plots.",
+    )
 
     args = parser.parse_args()
 
     out_dir = args.out_dir
     if not out_dir.endswith("/"):
         out_dir = out_dir + "/"
+
+    plot_dir = args.plot_dir
+    if not plot_dir.endswith("/"):
+        plot_dir = plot_dir + "/"
 
     mode = args.mode
     if mode == "nominal" or mode == "perm":
@@ -107,6 +123,7 @@ def main():
         all_variants_mode = args.all_variants
         num_permutations = args.num_permutations
         num_cores = args.num_cores
+        plot_threshold = args.plot_threshold
 
         # Perform cis-mapping, nominal or with permutations
         mapping = Cis(
@@ -120,6 +137,8 @@ def main():
             all_variants_mode,
             num_permutations,
             num_cores,
+            plot_threshold,
+            plot_dir,
         ).calculate_associations()
 
         mapping["chr"] = chromosome
@@ -127,9 +146,13 @@ def main():
         if not path.exists(out_dir):
             makedirs(out_dir)
 
-        mapping.to_csv(
-            f"{out_dir}{mode}_{chromosome}_{num_permutations}.csv", index=False
-        )
+        if mode == "nominal":
+            mapping.to_csv(f"{out_dir}{mode}_{chromosome}.csv", index=False)
+        else:
+            mapping.to_csv(
+                f"{out_dir}{mode}_{chromosome}_{num_permutations}.csv", index=False
+            )
+
     elif mode == "fdr":
         out_path = args.out
         threshold = args.threshold
