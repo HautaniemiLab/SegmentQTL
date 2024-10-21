@@ -1,8 +1,160 @@
 #!/usr/bin/env python
 
 import numpy as np
+import pandas as pd
 import tensorflow as tf
+from scipy.stats import f
+from sklearn.linear_model import LinearRegression
 from tensorflow_probability import distributions
+
+
+def residualize(regression_data: pd.DataFrame):
+    """
+    Residualize the GEX and cur_genotypes columns by removing the variance explained by covariates.
+
+    Parameters:
+    - regression_data: The input dataframe with GEX, cur_genotypes, and covariates.
+
+    Returns:
+    - residualized_df: A dataframe with residualized GEX and cur_genotypes.
+    """
+    gex = regression_data["GEX"].to_numpy().reshape(-1, 1)
+    cur_genotypes = regression_data["cur_genotypes"].to_numpy().reshape(-1, 1)
+    covariates = regression_data.drop(columns=["GEX", "cur_genotypes"]).to_numpy()
+
+    model = LinearRegression()
+
+    # Residualize GEX
+    model.fit(covariates, gex)
+    gex_residuals = gex - model.predict(covariates)
+
+    # Residualize cur_genotypes
+    model.fit(covariates, cur_genotypes)
+    cur_genotypes_residuals = cur_genotypes - model.predict(covariates)
+
+    residualized_df = pd.DataFrame(
+        {
+            "GEX": gex_residuals.flatten(),
+            "cur_genotypes": cur_genotypes_residuals.flatten(),
+        }
+    )
+
+    return residualized_df
+
+
+def get_tstat2(corr: float, df: int):
+    """Calculate t-statistic squared from correlation and degrees of freedom.
+
+    Parameters:
+    - corr: Pearson correlation
+    - df: Degrees of freedom
+
+    Returns:
+    - t-statistic squared
+    """
+    return df * corr**2 / (1 - corr**2)
+
+
+def get_pvalue_from_tstat2(tstat2: float, df: int):
+    """Calculate the p-value from the t-statistic and degrees of freedom.
+
+    Parameters:
+    - tstat2: t-statistic squared
+    - df: Degrees of freedom
+
+    Returns:
+    - p-value
+    """
+    # Use the F-distribution survival function (sf) for the upper tail probability
+    return f.sf(tstat2, 1, df)
+
+
+def get_slope(corr: float, phenotype_sd: np.ndarray, genotype_sd: np.ndarray):
+    """Calculate the slope.
+
+    Parameters:
+    - corr: Pearson correlation
+    - phenotype_sd: Standard deviation of phenotypes
+    - genotype_sd: Standard deviation of genotypes
+
+    Returns:
+    - slope
+    """
+    if genotype_sd < 1e-16 or phenotype_sd < 1e-16:
+        return 0
+    else:
+        return corr * phenotype_sd / genotype_sd
+
+
+def calculate_slope_and_se(regression_data: pd.DataFrame, corr: float):
+    """
+    Calculate the slope and its standard error.
+
+    Parameters:
+    regression_data: A dataframe with residualized "GEX" and "cur_genotypes" columns.
+    corr: The correlation between residualized "GEX" and "cur_genotypes".
+
+    Returns:
+    slope: The slope of the linear relationship.
+    slope_se: The standard error of the slope.
+    """
+    # Sample count is the number of rows in the dataframe
+    sample_count = len(regression_data)
+
+    # Number of covariates is the number of columns minus 2 (for GEX and cur_genotypes)
+    covariate_count = regression_data.shape[1] - 2
+
+    # Degrees of freedom
+    df = sample_count - 2 - covariate_count
+
+    # Calculate t-statistic squared
+    tstat2 = get_tstat2(corr, df)
+
+    # Get residualized GEX and cur_genotypes columns
+    gex_residuals = regression_data["GEX"].to_numpy()
+    cur_genotypes_residuals = regression_data["cur_genotypes"].to_numpy()
+
+    # Calculate standard deviations of phenotype (GEX) and genotype (cur_genotypes)
+    # using Bessel's correction (ddof=1)
+    phenotype_sd = np.std(gex_residuals, ddof=1)
+    genotype_sd = np.std(cur_genotypes_residuals, ddof=1)
+
+    # Calculate the slope
+    slope = get_slope(corr, phenotype_sd, genotype_sd)
+
+    # Calculate the standard error of the slope
+    slope_se = abs(slope) / np.sqrt(tstat2) if tstat2 > 0 else np.inf
+
+    return slope, slope_se
+
+
+def calculate_pvalue(df: pd.DataFrame, corr: float):
+    """
+    Calculate the p-value using the residualized data and correlation.
+
+    Parameters:
+    df: A dataframe with residualized "GEX" and "cur_genotypes" columns.
+    corr: The correlation between residualized "GEX" and "cur_genotypes".
+
+    Returns:
+    pval: The p-value for testing whether the slope is different from 0.
+    """
+    # Sample count is the number of rows in the dataframe
+    sample_count = len(df)
+
+    # Number of covariates is the number of columns minus 2 (for GEX and cur_genotypes)
+    covariate_count = df.shape[1] - 2
+
+    # Degrees of freedom
+    df = sample_count - 2 - covariate_count
+
+    # Calculate t-statistic squared
+    tstat2 = get_tstat2(corr, df)
+
+    # Calculate p-value from t-statistic
+    pval = get_pvalue_from_tstat2(tstat2, df)
+
+    return pval
 
 
 def calculate_beta_parameters(perm_p_values: np.ndarray):
@@ -52,37 +204,3 @@ def adjust_p_values(nominal_p_value: float, beta_shape1: float, beta_shape2: flo
     adjusted_p_value = beta_dist.cdf(nom_pval_tensor)
 
     return adjusted_p_value.numpy()
-
-
-def ols_reg_loglike(X: np.ndarray, Y: np.ndarray, R2_value: bool = False):
-    """
-    Ordinary least square regression and log-likelihood calculation. Optionally calculate the R2-value
-
-    Parameters:
-    - X: The dependent variables with the intercept term
-    - Y: The independent variable
-    - R2_value: Whether to calculate the R2-value, default false
-
-    Returns:
-    - log-likelihood of the model
-    - (Optionally) R2-value
-    """
-    n = len(Y)
-    X_tf = tf.constant(X, dtype=tf.float64)
-    Y_tf = tf.constant(Y, dtype=tf.float64)
-
-    coefficients = tf.linalg.lstsq(X_tf, Y_tf)
-    Y_pred = tf.matmul(X_tf, coefficients)
-    residuals = Y_tf - Y_pred
-    SSR = tf.reduce_sum(tf.square(residuals))
-    sigma2 = (1 / n) * SSR
-
-    loglike_res = -(n / 2) * tf.math.log(sigma2) - (1 / (2 * sigma2)) * SSR
-
-    if R2_value:
-        Y_mean = tf.reduce_mean(Y_tf)
-        SS = tf.reduce_sum(tf.square(Y_tf - Y_mean))
-        R2 = 1 - SSR / SS
-        return loglike_res, R2
-
-    return loglike_res

@@ -6,14 +6,17 @@ from time import time
 
 import numpy as np
 import pandas as pd
-import torch
-from torch.distributions import Chi2
 
+# import torch
+# from torch.distributions import Chi2
 from plotting_utils import box_and_whisker
 from statistical_utils import (
     adjust_p_values,
     calculate_beta_parameters,
-    ols_reg_loglike,
+    calculate_pvalue,
+    calculate_slope_and_se,
+    # ols_reg_loglike,
+    residualize,
 )
 
 
@@ -43,7 +46,6 @@ class Cis:
         self.samples = self.quan.columns.to_numpy()[3:]
 
         self.cov = self.load_and_validate_file(covariates, index_col=None)
-        # self.cov = pd.read_csv(covariates)
 
         self.segmentation = self.load_and_validate_file(segmentation, index_col=0)
         self.segmentation = self.segmentation[self.segmentation.chr == self.chromosome]
@@ -222,11 +224,9 @@ class Cis:
 
         permutations_results = pd.concat(permutations_list)
 
-        perm_p_values = permutations_results["pr_over_chi_squared"].dropna().to_numpy()
+        perm_p_values = permutations_results["p-value"].dropna().to_numpy()
         beta_shape1, beta_shape2 = calculate_beta_parameters(perm_p_values)
-        nominal_p_value = actual_associations.loc[:, "pr_over_chi_squared"].to_numpy()[
-            0
-        ]
+        nominal_p_value = actual_associations.loc[:, "p-value"].to_numpy()[0]
 
         # Adjust p-values using beta approximation
         adjusted_p_value = adjust_p_values(nominal_p_value, beta_shape1, beta_shape2)
@@ -518,6 +518,19 @@ class Cis:
             )
             df_res_list.append(perm_res)
 
+            if self.plot_threshold != -1:
+                p_value = -1
+                if (self.num_permutations) > 0:
+                    p_value = perm_res["p_adj"][0]
+                else:
+                    p_value = perm_res["p-value"][0]
+
+                if not np.isnan(p_value) and p_value < self.plot_threshold:
+                    gene_name = self.quan.index[gene_index]
+                    box_and_whisker(
+                        regression_data, gene_name, variant_index, self.plot_dir
+                    )
+
         return pd.concat(df_res_list, ignore_index=True)
 
     def gene_variant_regressions(
@@ -544,73 +557,38 @@ class Cis:
         associations = []
         current_gene = quantifications.index[gene_index]
 
-        def create_association(
-            gene,
-            variant,
-            R2_value,
-            likelihood_ratio_stat,
-            loglike_res,
-            loglike_nested,
-            pr_over_chi_squared,
-        ):
+        def create_association(gene, variant, slope, slope_se, p_value):
             return {
                 "gene": gene,
                 "variant": variant,
-                "R2_value": R2_value,
-                "likelihood_ratio_stat": likelihood_ratio_stat,
-                "log_likelihood_full": loglike_res,
-                "log_likelihood_nested": loglike_nested,
-                "pr_over_chi_squared": pr_over_chi_squared,
+                "slope": slope,
+                "slope_se": slope_se,
+                "p-value": p_value,
             }
 
         if len(regression_data) == 0:
             associations.append(
-                create_association(
-                    current_gene, variant, np.nan, np.nan, np.nan, np.nan, np.nan
-                )
+                create_association(current_gene, variant, np.nan, np.nan, np.nan)
             )
             return pd.DataFrame(associations)
 
-        Y = regression_data["GEX"].to_numpy().reshape(-1, 1)
+        # Residualize the data
+        residualized_df = residualize(regression_data)
 
-        X = np.column_stack((np.ones(len(Y)), regression_data.iloc[:, 1:]))
-        X_nested = np.column_stack(
-            (np.ones(len(Y)), regression_data.drop(columns=["GEX", "cur_genotypes"]))
+        # Calculate the correlation
+        corr = np.corrcoef(residualized_df["GEX"], residualized_df["cur_genotypes"])[
+            0, 1
+        ]
+
+        # Calculate slope and standard error
+        slope, slope_se = calculate_slope_and_se(residualized_df, corr)
+
+        # Calculate p-value
+        pval = calculate_pvalue(residualized_df, corr)
+
+        associations.append(
+            create_association(current_gene, variant, slope, slope_se, pval)
         )
-
-        loglike_res, R2_value = ols_reg_loglike(X, Y, R2_value=True)
-        loglike_nested = ols_reg_loglike(X_nested, Y)
-
-        likelihood_ratio_stat = -2 * (loglike_nested - loglike_res)
-
-        if np.isnan(likelihood_ratio_stat) or likelihood_ratio_stat.numpy() < 0:
-            associations.append(
-                create_association(
-                    current_gene, variant, np.nan, np.nan, np.nan, np.nan, np.nan
-                )
-            )
-        else:
-            # Degrees of freedom = 1, because it is the difference between full and nested models after genotypes are dropped
-            chi2_dist = Chi2(1)
-            pr_over_chi_squared = 1 - torch.exp(
-                torch.log(
-                    chi2_dist.cdf(
-                        torch.tensor(likelihood_ratio_stat.numpy(), dtype=torch.float64)
-                    )
-                )
-            )
-
-            associations.append(
-                create_association(
-                    current_gene,
-                    variant,
-                    R2_value.numpy(),
-                    likelihood_ratio_stat.numpy(),
-                    loglike_res.numpy(),
-                    loglike_nested.numpy(),
-                    pr_over_chi_squared.item(),
-                )
-            )
 
         return pd.DataFrame(associations)
 
@@ -688,7 +666,7 @@ class Cis:
                 if (self.num_permutations) > 0:
                     p_value = association_res["p_adj"][0]
                 else:
-                    p_value = association_res["pr_over_chi_squared"][0]
+                    p_value = association_res["p-value"][0]
 
                 if not np.isnan(p_value) and p_value < self.plot_threshold:
                     gene_name = self.quan.index[gene_index]
