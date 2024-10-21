@@ -348,79 +348,6 @@ specific gene index:
 
   - A dataframe containing the association results for the specified gene index.
 
-<a id="segmentqtl"></a>
-
-<a id="statistical_utils"></a>
-
-# statistical\_utils
-
-<a id="statistical_utils.calculate_beta_parameters"></a>
-
-#### calculate\_beta\_parameters
-
-```python
-def calculate_beta_parameters(perm_p_values: np.ndarray)
-```
-
-Calculate beta parameters for the array of p-value obtained from permutations.
-
-**Arguments**:
-
-  - perm_p_values: Array of permutation p-values
-  
-
-**Returns**:
-
-  Tuple of
-  - Beta parameter 1
-  - Beta parameter 2
-
-<a id="statistical_utils.adjust_p_values"></a>
-
-#### adjust\_p\_values
-
-```python
-def adjust_p_values(nominal_p_value: float, beta_shape1: float,
-                    beta_shape2: float)
-```
-
-Adjust p-values for multiple comparisons.
-
-**Arguments**:
-
-  - nominal_p_value: The p-value from nominal pass
-  - beta_shape1: Beta parameter 1
-  - beta_shape2: Beta parameter 2
-  
-
-**Returns**:
-
-  - Adjusted p-value
-
-<a id="statistical_utils.ols_reg_loglike"></a>
-
-#### ols\_reg\_loglike
-
-```python
-def ols_reg_loglike(X: np.ndarray, Y: np.ndarray, R2_value: bool = False)
-```
-
-Ordinary least square regression and log-likelihood calculation. Optionally calculate the R2-value
-
-**Arguments**:
-
-  - X: The dependent variables with the intercept term
-  - Y: The independent variable
-  - R2_value: Whether to calculate the R2-value, default false
-  
-
-**Returns**:
-
-  - log-likelihood of the model
-  - (Optionally) R2-value
-
-<a id="__init__"></a>
-
 <a id="fdr_correction"></a>
 
 # fdr\_correction
@@ -464,7 +391,7 @@ Perform Benjamini Hochberg false discovery rate correction to mapping results.
 
   - full_res: Dataframe with all mapping results including a column for fdr corrected p-values.
 
-<a id="plotting_utils"></a>
+<a id="__init__"></a>
 
 # plotting\_utils
 
@@ -484,3 +411,171 @@ Create a box-and-whisker plot with significance bars and Kruskal-Wallis test for
   - df: Dataframe containing 'GEX' and 'cur_genotypes' columns.
   - gene_name: Name of the gene that is used for the plot title and file name.
   - output_folder: Path to the folder where the plot should be saved.
+
+<a id="segmentqtl"></a>
+
+# statistical\_utils
+
+<a id="statistical_utils.residualize"></a>
+
+#### residualize
+
+```python
+def residualize(regression_data: pd.DataFrame)
+```
+
+Residualize the GEX and cur_genotypes columns by removing the variance explained by covariates.
+
+**Arguments**:
+
+  - regression_data: The input dataframe with GEX, cur_genotypes, and covariates.
+  
+
+**Returns**:
+
+  - residualized_df: A dataframe with residualized GEX and cur_genotypes.
+
+<a id="statistical_utils.get_tstat2"></a>
+
+#### get\_tstat2
+
+```python
+def get_tstat2(corr: float, df: int)
+```
+
+Calculate t-statistic squared from correlation and degrees of freedom.
+
+**Arguments**:
+
+  - corr: Pearson correlation
+  - df: Degrees of freedom
+  
+
+**Returns**:
+
+  - t-statistic squared
+
+<a id="statistical_utils.get_pvalue_from_tstat2"></a>
+
+#### get\_pvalue\_from\_tstat2
+
+```python
+def get_pvalue_from_tstat2(tstat2: float, df: int)
+```
+
+Calculate the p-value from the t-statistic and degrees of freedom.
+
+**Arguments**:
+
+  - tstat2: t-statistic squared
+  - df: Degrees of freedom
+  
+
+**Returns**:
+
+  - p-value
+
+<a id="statistical_utils.get_slope"></a>
+
+#### get\_slope
+
+```python
+def get_slope(corr: float, phenotype_sd: np.ndarray, genotype_sd: np.ndarray)
+```
+
+Calculate the slope.
+
+**Arguments**:
+
+  - corr: Pearson correlation
+  - phenotype_sd: Standard deviation of phenotypes
+  - genotype_sd: Standard deviation of genotypes
+  
+
+**Returns**:
+
+  - slope
+
+<a id="statistical_utils.calculate_slope_and_se"></a>
+
+#### calculate\_slope\_and\_se
+
+```python
+def calculate_slope_and_se(regression_data: pd.DataFrame, corr: float)
+```
+
+Calculate the slope and its standard error.
+
+**Arguments**:
+
+- `regression_data` - A dataframe with residualized "GEX" and "cur_genotypes" columns.
+- `corr` - The correlation between residualized "GEX" and "cur_genotypes".
+  
+
+**Returns**:
+
+- `slope` - The slope of the linear relationship.
+- `slope_se` - The standard error of the slope.
+
+<a id="statistical_utils.calculate_pvalue"></a>
+
+#### calculate\_pvalue
+
+```python
+def calculate_pvalue(df: pd.DataFrame, corr: float)
+```
+
+Calculate the p-value using the residualized data and correlation.
+
+**Arguments**:
+
+- `df` - A dataframe with residualized "GEX" and "cur_genotypes" columns.
+- `corr` - The correlation between residualized "GEX" and "cur_genotypes".
+  
+
+**Returns**:
+
+- `pval` - The p-value for testing whether the slope is different from 0.
+
+<a id="statistical_utils.calculate_beta_parameters"></a>
+
+#### calculate\_beta\_parameters
+
+```python
+def calculate_beta_parameters(perm_p_values: np.ndarray)
+```
+
+Calculate beta parameters for the array of p-value obtained from permutations.
+
+**Arguments**:
+
+  - perm_p_values: Array of permutation p-values
+  
+
+**Returns**:
+
+  Tuple of
+  - Beta parameter 1
+  - Beta parameter 2
+
+<a id="statistical_utils.adjust_p_values"></a>
+
+#### adjust\_p\_values
+
+```python
+def adjust_p_values(nominal_p_value: float, beta_shape1: float,
+                    beta_shape2: float)
+```
+
+Adjust p-values for multiple comparisons.
+
+**Arguments**:
+
+  - nominal_p_value: The p-value from nominal pass
+  - beta_shape1: Beta parameter 1
+  - beta_shape2: Beta parameter 2
+  
+
+**Returns**:
+
+  - Adjusted p-value
