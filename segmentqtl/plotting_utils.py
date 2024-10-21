@@ -30,24 +30,21 @@ def box_and_whisker(df: pd.DataFrame, gene_name: str, variant: str, output_folde
     ax.set_ylabel("Expression (log(TMM + 1))")
     ax.set_xticklabels(xticklabels)
     ax.tick_params(axis="x", which="major", length=0)
-    xticks = [0.5] + [x + 0.5 for x in ax.get_xticks()]
-    ax.set_xticks(xticks, minor=True)
-    ax.tick_params(axis="x", which="minor", length=3, width=1)
 
     plt.setp(bp["medians"], color="k")
 
-    kruskal_stat, kruskal_p = stats.kruskal(*grouped_data)
+    _, kruskal_p = stats.kruskal(*grouped_data)
     ax.text(
-        1.05,
+        0,
         -0.1,
         f"Kruskal-Wallis p = {kruskal_p:.3g}",
         transform=ax.transAxes,
         fontsize=12,
         va="top",
-        ha="right",
+        ha="left",
     )
 
-    # Check pairwise significance (always show comparison bars)
+    # Check pairwise significance
     significant_combinations = []
     ls = list(range(1, len(grouped_data) + 1))
     combinations = [
@@ -57,7 +54,7 @@ def box_and_whisker(df: pd.DataFrame, gene_name: str, variant: str, output_folde
     for c in combinations:
         data1 = grouped_data[c[0] - 1]
         data2 = grouped_data[c[1] - 1]
-        U, p = stats.mannwhitneyu(data1, data2, alternative="two-sided")
+        _, p = stats.mannwhitneyu(data1, data2, alternative="two-sided")
         significant_combinations.append([c, p])
 
     bottom, top = ax.get_ylim()
@@ -72,7 +69,7 @@ def box_and_whisker(df: pd.DataFrame, gene_name: str, variant: str, output_folde
         x1 = significant_combination[0][0]
         x2 = significant_combination[0][1]
         level = len(significant_combinations) - i
-        spacing_factor = 0.05  # Adjust the spacing between comparison bars
+        spacing_factor = 0.05
         bar_height = (yrange * (0.08 + spacing_factor * level)) + top
         bar_tips = bar_height - (yrange * (0.0001 + spacing_factor * 0.5))
 
@@ -91,12 +88,12 @@ def box_and_whisker(df: pd.DataFrame, gene_name: str, variant: str, output_folde
     # Annotate sample size below each box
     for i, dataset in enumerate(grouped_data):
         sample_size = len(dataset)
-        # Reduce space below the sample sizes by adjusting the position
         ax.text(i + 1, bottom, rf"n = {sample_size}", ha="center", size="x-small")
 
     if not path.exists(output_folder):
         makedirs(output_folder)
 
+    plt.autoscale(axis="y")
     filename = path.join(output_folder, f"{gene_name}_{variant}.png")
     plt.savefig(filename, dpi=300)
     plt.clf()
