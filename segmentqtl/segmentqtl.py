@@ -12,13 +12,13 @@ def main():
     parser.add_argument(
         "--mode",
         type=str,
-        default="nominal",
+        default="perm",
         help="Nominal (nominal) or permutation (perm) mapping or fdr correction (fdr)",
     )
     parser.add_argument(
         "--chromosome",
         type=str,
-        default="21",
+        default="10",
         help="Chromosome number or X with or without chr prefix",
     )
     parser.add_argument(
@@ -53,13 +53,15 @@ def main():
     )
     parser.add_argument(
         "--all_variants",
-        action="store_true",
-        help="Test all applicable variants per gene instead of only the best correlated one",
+        nargs="?",
+        const=True,
+        default=False,
+        help="Test all applicable variants for a given gene. Provide a gene ID or use without a value to process all genes.",
     )
     parser.add_argument(
         "--num_permutations",
         type=int,
-        default=10,
+        default=8000,
         help="Number of permutations to be run on each phenotype",
     )
     parser.add_argument(
@@ -71,13 +73,13 @@ def main():
     parser.add_argument(
         "--out_dir",
         type=str,
-        default="../results/",
+        default="/results/",
         help="Directory where intermediate results are saved",
     )
     parser.add_argument(
         "--out",
         type=str,
-        default="../fdr_corrected_res.csv",
+        default="../mod_fdr_corrected_res.csv",
         help="File path to which fdr corrected full results are saved to. Must be a csv file.",
     )
     parser.add_argument(
@@ -95,7 +97,7 @@ def main():
     parser.add_argument(
         "--plot_dir",
         type=str,
-        default="../plots/",
+        default="plots/",
         help="Directory for plots.",
     )
 

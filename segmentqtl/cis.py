@@ -57,7 +57,17 @@ class Cis:
         self.genotype = self.genotype.loc[:, self.genotype.columns.isin(self.samples)]
         self.genotype = self.genotype[self.samples]
 
-        self.all_variants_mode = all_variants_mode
+        if isinstance(all_variants_mode, str):
+            # Check if the gene ID given with --all_variants exists in quantification df
+            if all_variants_mode in self.quan.index:
+                self.quan = self.quan[self.quan.index == all_variants_mode]
+                self.all_variants_mode = True
+            else:
+                raise ValueError(
+                    f"Gene ID '{all_variants_mode}' not found in the quantification file under the specified chromosome."
+                )
+        else:
+            self.all_variants_mode = all_variants_mode
 
         self.num_cores = num_cores
 
@@ -608,7 +618,7 @@ class Cis:
         """
         start = time()
 
-        limit = 5  # self.quan.shape[0]  # For testing, use small number, eg. 3
+        limit = self.quan.shape[0]  # For testing, use small number, eg. 3
 
         set_start_method("spawn")
         pool = Pool(processes=self.num_cores)
