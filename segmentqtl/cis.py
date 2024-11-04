@@ -571,6 +571,7 @@ class Cis:
             return {
                 "gene": gene,
                 "variant": variant,
+                "number_of_samples": regression_data.shape[0],
                 "slope": slope,
                 "slope_se": slope_se,
                 "p-value": p_value,
