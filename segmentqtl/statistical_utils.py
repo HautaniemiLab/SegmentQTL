@@ -24,11 +24,9 @@ def residualize(regression_data: pd.DataFrame):
 
     model = LinearRegression()
 
-    # Residualize GEX
     model.fit(covariates, gex)
     gex_residuals = gex - model.predict(covariates)
 
-    # Residualize cur_genotypes
     model.fit(covariates, cur_genotypes)
     cur_genotypes_residuals = cur_genotypes - model.predict(covariates)
 
@@ -98,19 +96,13 @@ def calculate_slope_and_se(regression_data: pd.DataFrame, corr: float):
     slope: The slope of the linear relationship.
     slope_se: The standard error of the slope.
     """
-    # Sample count is the number of rows in the dataframe
     sample_count = len(regression_data)
-
-    # Number of covariates is the number of columns minus 2 (for GEX and cur_genotypes)
     covariate_count = regression_data.shape[1] - 2
 
-    # Degrees of freedom
     df = sample_count - 2 - covariate_count
 
-    # Calculate t-statistic squared
     tstat2 = get_tstat2(corr, df)
 
-    # Get residualized GEX and cur_genotypes columns
     gex_residuals = regression_data["GEX"].to_numpy()
     cur_genotypes_residuals = regression_data["cur_genotypes"].to_numpy()
 
@@ -119,10 +111,8 @@ def calculate_slope_and_se(regression_data: pd.DataFrame, corr: float):
     phenotype_sd = np.std(gex_residuals, ddof=1)
     genotype_sd = np.std(cur_genotypes_residuals, ddof=1)
 
-    # Calculate the slope
     slope = get_slope(corr, phenotype_sd, genotype_sd)
 
-    # Calculate the standard error of the slope
     slope_se = abs(slope) / np.sqrt(tstat2) if tstat2 > 0 else np.inf
 
     return slope, slope_se
@@ -139,19 +129,13 @@ def calculate_pvalue(df: pd.DataFrame, corr: float):
     Returns:
     pval: The p-value for testing whether the slope is different from 0.
     """
-    # Sample count is the number of rows in the dataframe
     sample_count = len(df)
-
-    # Number of covariates is the number of columns minus 2 (for GEX and cur_genotypes)
     covariate_count = df.shape[1] - 2
 
-    # Degrees of freedom
     df = sample_count - 2 - covariate_count
 
-    # Calculate t-statistic squared
     tstat2 = get_tstat2(corr, df)
 
-    # Calculate p-value from t-statistic
     pval = get_pvalue_from_tstat2(tstat2, df)
 
     return pval

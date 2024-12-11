@@ -32,6 +32,7 @@ class Cis:
         genotype,
         all_variants_mode,
         num_permutations,
+        window,
         num_cores,
         plot_threshold,
         plot_dir,
@@ -41,7 +42,7 @@ class Cis:
         self.copy_number_df = self.load_and_validate_file(copynumber, index_col=0)
 
         self.full_quan = self.load_and_validate_file(quantifications, index_col=3)
-        self.quan = self.full_quan[self.full_quan.chr == self.chromosome]
+        self.quan = self.full_quan[self.full_quan["chr"] == self.chromosome]
 
         self.samples = self.quan.columns.to_numpy()[3:]
 
@@ -68,6 +69,8 @@ class Cis:
                 )
         else:
             self.all_variants_mode = all_variants_mode
+
+        self.window = window
 
         self.num_cores = num_cores
 
@@ -113,8 +116,8 @@ class Cis:
         Returns:
         - Tuple of window_start and window_end, which define the start and end positions of the window
         """
-        window_start = self.quan["start"].iloc[gene_index] - 500000
-        window_end = self.quan["end"].iloc[gene_index] + 500000
+        window_start = self.quan["start"].iloc[gene_index] - self.window
+        window_end = self.quan["end"].iloc[gene_index] + self.window
         return [window_start, window_end]
 
     def get_variants_for_gene_window(self, current_start: int, current_end: int):
@@ -152,8 +155,8 @@ class Cis:
         Returns:
         - variants: Subset of genotype dataframe that is filtered and masked by segmentation and window.
         """
-        start += 500000
-        end -= 500000
+        start += self.window
+        end -= self.window
 
         index_array = variants.index.astype(str).to_numpy()
         variant_pos = [int(index.split(":")[1]) for index in index_array]
@@ -234,9 +237,9 @@ class Cis:
 
         permutations_results = pd.concat(permutations_list)
 
-        perm_p_values = permutations_results["p-value"].dropna().to_numpy()
+        perm_p_values = permutations_results["nominal_p"].dropna().to_numpy()
         beta_shape1, beta_shape2 = calculate_beta_parameters(perm_p_values)
-        nominal_p_value = actual_associations.loc[:, "p-value"].to_numpy()[0]
+        nominal_p_value = actual_associations.loc[:, "nominal_p"].to_numpy()[0]
 
         # Adjust p-values using beta approximation
         adjusted_p_value = adjust_p_values(nominal_p_value, beta_shape1, beta_shape2)
@@ -533,7 +536,7 @@ class Cis:
                 if (self.num_permutations) > 0:
                     p_value = perm_res["p_adj"][0]
                 else:
-                    p_value = perm_res["p-value"][0]
+                    p_value = perm_res["nominal_p"][0]
 
                 if not np.isnan(p_value) and p_value < self.plot_threshold:
                     gene_name = self.quan.index[gene_index]
@@ -574,7 +577,7 @@ class Cis:
                 "number_of_samples": regression_data.shape[0],
                 "slope": slope,
                 "slope_se": slope_se,
-                "p-value": p_value,
+                "nominal_p": p_value,
             }
 
         if len(regression_data) == 0:
@@ -677,7 +680,7 @@ class Cis:
                 if (self.num_permutations) > 0:
                     p_value = association_res["p_adj"][0]
                 else:
-                    p_value = association_res["p-value"][0]
+                    p_value = association_res["nominal_p"][0]
 
                 if not np.isnan(p_value) and p_value < self.plot_threshold:
                     gene_name = self.quan.index[gene_index]

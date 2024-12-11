@@ -7,7 +7,7 @@ from statsmodels.stats.multitest import multipletests
 
 def combine_chromosome(outdir: str):
     """
-    Combine all csv files fro the given directory.
+    Combine all csv files from the given directory.
 
     Parameters:
     - outdir: Directory to which the mapping results have been saved.

@@ -18,7 +18,7 @@ def main():
     parser.add_argument(
         "--chromosome",
         type=str,
-        default="10",
+        default="7",
         help="Chromosome number or X with or without chr prefix",
     )
     parser.add_argument(
@@ -55,7 +55,7 @@ def main():
         "--all_variants",
         nargs="?",
         const=True,
-        default=False,
+        default=False,  # "ENSG00000122512",
         help="Test all applicable variants for a given gene. Provide a gene ID or use without a value to process all genes.",
     )
     parser.add_argument(
@@ -63,6 +63,12 @@ def main():
         type=int,
         default=8000,
         help="Number of permutations to be run on each phenotype",
+    )
+    parser.add_argument(
+        "--window",
+        type=int,
+        default=1000000,
+        help="Window size",
     )
     parser.add_argument(
         "--num_cores",
@@ -73,13 +79,13 @@ def main():
     parser.add_argument(
         "--out_dir",
         type=str,
-        default="/results/",
+        default="results/",
         help="Directory where intermediate results are saved",
     )
     parser.add_argument(
-        "--out",
+        "--fdr_out",
         type=str,
-        default="../mod_fdr_corrected_res.csv",
+        default="../fdr_corrected_res.csv",
         help="File path to which fdr corrected full results are saved to. Must be a csv file.",
     )
     parser.add_argument(
@@ -124,6 +130,7 @@ def main():
         genotypes_file = f"{args.genotypes}/{chromosome}.csv"
         all_variants_mode = args.all_variants
         num_permutations = args.num_permutations
+        window = args.window
         num_cores = args.num_cores
         plot_threshold = args.plot_threshold
 
@@ -138,6 +145,7 @@ def main():
             genotypes_file,
             all_variants_mode,
             num_permutations,
+            window,
             num_cores,
             plot_threshold,
             plot_dir,
@@ -148,7 +156,11 @@ def main():
         if not path.exists(out_dir):
             makedirs(out_dir)
 
-        if mode == "nominal":
+        if isinstance(all_variants_mode, str):
+            mapping.to_csv(
+                f"{out_dir}{all_variants_mode}_{mode}_{chromosome}.csv", index=False
+            )
+        elif mode == "nominal":
             mapping.to_csv(f"{out_dir}{mode}_{chromosome}.csv", index=False)
         else:
             mapping.to_csv(
@@ -156,7 +168,7 @@ def main():
             )
 
     elif mode == "fdr":
-        out_path = args.out
+        out_path = args.fdr_out
         threshold = args.threshold
         fdr_corrected_res = fdr(out_dir, threshold)
         fdr_corrected_res.to_csv(out_path, index=False)
