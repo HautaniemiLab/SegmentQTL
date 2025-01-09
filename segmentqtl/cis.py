@@ -7,15 +7,11 @@ from time import time
 import numpy as np
 import pandas as pd
 
-# import torch
-# from torch.distributions import Chi2
 from plotting_utils import box_and_whisker
 from statistical_utils import (
     adjust_p_values,
-    calculate_beta_parameters,
     calculate_pvalue,
     calculate_slope_and_se,
-    # ols_reg_loglike,
     residualize,
 )
 
@@ -31,6 +27,7 @@ class Cis:
         segmentation,
         genotype,
         all_variants_mode,
+        perm_method,
         num_permutations,
         window,
         num_cores,
@@ -73,6 +70,12 @@ class Cis:
         self.window = window
 
         self.num_cores = num_cores
+
+        self.perm_method = perm_method
+        if not (perm_method == "beta" or perm_method == "direct"):
+            raise ValueError(
+                f"Invalid perm_method selected: '{perm_method}'. Please select beta or direct."
+            )
 
         self.plot_threshold = plot_threshold
         self.plot_dir = plot_dir
@@ -217,32 +220,58 @@ class Cis:
         if self.num_permutations == 0:
             return actual_associations
 
-        permutations_list = []
-
-        perm_indices = np.random.choice(
-            range(self.full_quan.shape[0]), self.num_permutations, replace=False
-        )
-
-        for index in perm_indices:
-            # Perform association testing with the permuted gene index
-            perm_data = self.permutation_data(
-                gene_index, index, transf_variants, variant
-            )
-            associations = self.gene_variant_regressions(
-                index, self.full_quan, "", perm_data
+        if self.perm_method == "beta":
+            perm_indices = np.random.choice(
+                range(self.full_quan.shape[0]), self.num_permutations, replace=False
             )
 
-            # Store the results of the permutation
-            permutations_list.append(associations)
+            r2_perm = np.zeros(self.num_permutations)
 
-        permutations_results = pd.concat(permutations_list)
+            for index in range(self.num_permutations):
+                # Perform association testing with the permuted gene index
+                perm_data = self.permutation_data(
+                    gene_index, perm_indices[index], transf_variants, variant
+                )
 
-        perm_p_values = permutations_results["nominal_p"].dropna().to_numpy()
-        beta_shape1, beta_shape2 = calculate_beta_parameters(perm_p_values)
-        nominal_p_value = actual_associations.loc[:, "nominal_p"].to_numpy()[0]
+                perm_gex, perm_genotypes = residualize(perm_data)
 
-        # Adjust p-values using beta approximation
-        adjusted_p_value = adjust_p_values(nominal_p_value, beta_shape1, beta_shape2)
+                r_perm = np.corrcoef(perm_gex, perm_genotypes)[0, 1]
+
+                r2_perm[index] = r_perm**2
+
+            nom_gex, nom_genotypes = residualize(regression_data)
+
+            nominal_r = np.corrcoef(nom_gex, nom_genotypes)[0, 1]
+            nominal_r2 = np.power(nominal_r, 2)
+
+            # Adjust p-values using beta approximation
+            adjusted_p_value = adjust_p_values(r2_perm, nominal_r2)
+
+        else:
+            permuted_correlations = []
+
+            # In direct scheme, permute whole dataset
+            for index in range(self.full_quan.shape[0]):
+                perm_data = self.permutation_data(
+                    gene_index, index, transf_variants, variant
+                )
+
+                residualized_data = residualize(perm_data)
+
+                perm_corr = np.corrcoef(
+                    residualized_data["cur_genotypes"], residualized_data["GEX"]
+                )[0, 1]
+                permuted_correlations.append(perm_corr)
+
+            actual_corr = np.corrcoef(
+                regression_data["cur_genotypes"], regression_data["GEX"]
+            )[0, 1]
+
+            permuted_correlations = np.array(permuted_correlations)
+            adjusted_p_value = (
+                np.sum(np.abs(permuted_correlations) > np.abs(actual_corr))
+                / self.full_quan.shape[0]
+            )
 
         # Add adjusted p-values to actual associations
         actual_associations["p_adj"] = adjusted_p_value
@@ -310,7 +339,7 @@ class Cis:
 
     def check_grouping(self, cur_genotypes_filtered: np.ndarray):
         """
-        Find if tail and middle values have adequate representation in data.
+        Find if the genotype dosages have adequate variation in the data.
 
         Parameters:
         - cur_genotypes_filtered: Array of genotype dosages
@@ -320,16 +349,14 @@ class Cis:
         """
         bins = [0, 0.34, 0.67, 1]
         genotype_groups = pd.cut(cur_genotypes_filtered, bins=bins, include_lowest=True)
-        group_counts = genotype_groups.value_counts().sort_index()
+        group_counts = genotype_groups.value_counts()
 
-        # TODO: Which threshold?
         threshold = 10  # Minimum number of group members
 
-        # Check tails and middle against threshold
-        if (
-            group_counts.iloc[0] + group_counts.iloc[2] < threshold
-            or group_counts.iloc[1] < threshold
-        ):
+        # Check if at least two groups exceed the threshold
+        groups_exceeding_threshold = (group_counts > threshold).sum()
+
+        if groups_exceeding_threshold < 2:
             return False
 
         return True
@@ -371,7 +398,6 @@ class Cis:
         for cov_value in cov_values:
             mask &= ~np.isnan(cov_value)
 
-        # TODO: Test which threshold to use
         if np.sum(mask) < 30:  # If less than 30 valid rows, skip this variant
             return [], [], [], []
 
@@ -586,18 +612,19 @@ class Cis:
             )
             return pd.DataFrame(associations)
 
-        # Residualize the data
-        residualized_df = residualize(regression_data)
+        gex, genotypes = residualize(regression_data)
 
-        # Calculate the correlation
-        corr = np.corrcoef(residualized_df["GEX"], residualized_df["cur_genotypes"])[
-            0, 1
-        ]
+        corr = np.corrcoef(gex, genotypes)[0, 1]
 
-        # Calculate slope and standard error
+        residualized_df = pd.DataFrame(
+            {
+                "GEX": gex,
+                "cur_genotypes": genotypes,
+            }
+        )
+
         slope, slope_se = calculate_slope_and_se(residualized_df, corr)
 
-        # Calculate p-value
         pval = calculate_pvalue(residualized_df, corr)
 
         associations.append(

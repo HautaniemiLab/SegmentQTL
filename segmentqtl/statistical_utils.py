@@ -2,10 +2,10 @@
 
 import numpy as np
 import pandas as pd
-import tensorflow as tf
-from scipy.stats import f
+from scipy.optimize import minimize, newton
+from scipy.special import loggamma
+from scipy.stats import beta, f
 from sklearn.linear_model import LinearRegression
-from tensorflow_probability import distributions
 
 
 def residualize(regression_data: pd.DataFrame):
@@ -16,7 +16,7 @@ def residualize(regression_data: pd.DataFrame):
     - regression_data: The input dataframe with GEX, cur_genotypes, and covariates.
 
     Returns:
-    - residualized_df: A dataframe with residualized GEX and cur_genotypes.
+    - Residualized GEX and genotypes.
     """
     gex = regression_data["GEX"].to_numpy().reshape(-1, 1)
     cur_genotypes = regression_data["cur_genotypes"].to_numpy().reshape(-1, 1)
@@ -30,14 +30,7 @@ def residualize(regression_data: pd.DataFrame):
     model.fit(covariates, cur_genotypes)
     cur_genotypes_residuals = cur_genotypes - model.predict(covariates)
 
-    residualized_df = pd.DataFrame(
-        {
-            "GEX": gex_residuals.flatten(),
-            "cur_genotypes": cur_genotypes_residuals.flatten(),
-        }
-    )
-
-    return residualized_df
+    return gex_residuals.flatten(), cur_genotypes_residuals.flatten()
 
 
 def get_tstat2(corr: float, df: int):
@@ -65,6 +58,91 @@ def get_pvalue_from_tstat2(tstat2: float, df: int):
     """
     # Use the F-distribution survival function (sf) for the upper tail probability
     return f.sf(tstat2, 1, df)
+
+
+def get_pvalue_from_corr(r2: float, df: int):
+    """Calculate p-value from correlation r2 and degrees of freedom."""
+    tstat2 = get_tstat2(np.sqrt(r2), df)
+    return f.sf(tstat2, 1, df)
+
+
+def beta_shape1_from_dof(r2_values, dof):
+    """Estimate Beta shape1 parameter from moment matching."""
+    pvals = np.array([get_pvalue_from_corr(r2, dof) for r2 in r2_values])
+    mean_p = np.mean(pvals)
+    var_p = np.var(pvals)
+    return mean_p * (mean_p * (1 - mean_p) / var_p - 1.0)
+
+
+def beta_log_likelihood(pvals, shape1, shape2):
+    """Negative log-likelihood for the Beta distribution."""
+    log_beta = loggamma(shape1) + loggamma(shape2) - loggamma(shape1 + shape2)
+    return (
+        (1.0 - shape1) * np.sum(np.log(pvals))
+        + (1.0 - shape2) * np.sum(np.log(1.0 - pvals))
+        + len(pvals) * log_beta
+    )
+
+
+def optimize_dof(r2_perm, dof_init, tol=1e-4):
+    """
+    Optimize degrees of freedom such that Beta shape1 ≈ 1.
+    """
+
+    def target(log_dof):
+        return np.log(beta_shape1_from_dof(r2_perm, np.exp(log_dof)))
+
+    log_dof_init = np.log(dof_init)
+    try:
+        log_true_dof = newton(target, log_dof_init, tol=tol, maxiter=50)
+        return np.exp(log_true_dof)
+    except RuntimeError:
+        print("Warning: Newton's method failed, using fallback minimization.")
+        res = minimize(
+            lambda x: np.abs(beta_shape1_from_dof(r2_perm, x) - 1.0),
+            dof_init,
+            method="Nelder-Mead",
+            tol=tol,
+        )
+        return res.x[0]
+
+
+def fit_beta_parameters(r2_perm, dof):
+    """
+    Fit Beta distribution parameters to permutation p-values.
+    """
+    pvals = np.array([get_pvalue_from_corr(r2, dof) for r2 in r2_perm])
+    mean_p, var_p = np.mean(pvals), np.var(pvals)
+
+    # Initial Beta parameter estimates
+    beta_shape1 = mean_p * (mean_p * (1 - mean_p) / var_p - 1)
+    beta_shape2 = beta_shape1 * (1 / mean_p - 1)
+
+    # Refine using log-likelihood minimization
+    res = minimize(
+        lambda s: beta_log_likelihood(pvals, s[0], s[1]),
+        [beta_shape1, beta_shape2],
+        method="Nelder-Mead",
+    )
+    beta_shape1, beta_shape2 = res.x
+    return beta_shape1, beta_shape2, pvals
+
+
+def adjust_p_values(r2_perm, r2_nominal, dof_init=10, tol=1e-4):
+    """
+    Calculate Beta-approximated p-values from permutation results.
+    """
+    # Optimize DOF
+    optimized_dof = optimize_dof(r2_perm, dof_init, tol)
+
+    # Fit Beta parameters
+    beta_shape1, beta_shape2, pvals_perm = fit_beta_parameters(r2_perm, optimized_dof)
+
+    # Calculate p-value for nominal r2
+    pval_nominal = get_pvalue_from_corr(r2_nominal, optimized_dof)
+    adjusted_pval = beta.cdf(pval_nominal, beta_shape1, beta_shape2)
+
+    return adjusted_pval
 
 
 def get_slope(corr: float, phenotype_sd: np.ndarray, genotype_sd: np.ndarray):
@@ -139,52 +217,3 @@ def calculate_pvalue(df: pd.DataFrame, corr: float):
     pval = get_pvalue_from_tstat2(tstat2, df)
 
     return pval
-
-
-def calculate_beta_parameters(perm_p_values: np.ndarray):
-    """
-    Calculate beta parameters for the array of p-value obtained from permutations.
-
-    Parameters:
-    - perm_p_values: Array of permutation p-values
-
-    Returns:
-    Tuple of
-    - Beta parameter 1
-    - Beta parameter 2
-    """
-    if perm_p_values is None or len(perm_p_values) == 0:
-        return np.nan, np.nan
-
-    perm_p_values_tensor = tf.constant(perm_p_values, dtype=tf.float64)
-
-    mean_p_value = tf.reduce_mean(perm_p_values_tensor)
-    var_p_value = tf.math.reduce_variance(perm_p_values_tensor)
-
-    beta_shape1 = mean_p_value * (mean_p_value * (1 - mean_p_value) / var_p_value - 1)
-    beta_shape2 = beta_shape1 * (1 / mean_p_value - 1)
-
-    return beta_shape1, beta_shape2
-
-
-def adjust_p_values(nominal_p_value: float, beta_shape1: float, beta_shape2: float):
-    """
-    Adjust p-values for multiple comparisons.
-
-    Parameters:
-    - nominal_p_value: The p-value from nominal pass
-    - beta_shape1: Beta parameter 1
-    - beta_shape2: Beta parameter 2
-
-    Returns:
-    - Adjusted p-value
-    """
-    if np.isnan(nominal_p_value) or np.isnan(beta_shape1) or np.isnan(beta_shape2):
-        return np.nan
-
-    nom_pval_tensor = tf.constant(nominal_p_value, dtype=tf.float64)
-
-    beta_dist = distributions.Beta(beta_shape1, beta_shape2)
-    adjusted_p_value = beta_dist.cdf(nom_pval_tensor)
-
-    return adjusted_p_value.numpy()
