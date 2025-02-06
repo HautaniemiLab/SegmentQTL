@@ -45,7 +45,7 @@ SegmentQTL is executed via the command line with various options to control inpu
 - `--perm_method`  
   - Method used for permutation (`beta` or `direct`).
 - `--num_permutations`  
-  - Number of permutations per phenotype (default: `10000`).
+  - Number of permutations per phenotype (default: `8000`).
 - `--window`  
   - Window size in base pairs for cis-mapping (default: `1,000,000` bp).
 - `--num_cores`  
