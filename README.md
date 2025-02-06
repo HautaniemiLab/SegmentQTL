@@ -9,7 +9,7 @@ SegmentQTL supports both **nominal** and **permutation-based** association testi
 ## Features
 
 - **Segmentation-aware QTL mapping**: Filters out associations where variants and genes are separated by breakpoints.
-- **Multiple mapping modes**: Nominal p-value testing, permutation-based testing, and FDR correction.
+- **Multiple modes**: Nominal p-value testing, permutation-based testing, and FDR correction.
 - **Parallelization support**: Users can specify the number of CPU cores to accelerate computations.
 - **Permutation testing options**: Supports beta approximation and direct permutation methods.
 - **Structured input format**: Accepts genotype, segmentation, covariate, copy number, and quantification data in CSV format.
@@ -63,8 +63,8 @@ SegmentQTL is executed via the command line with various options to control inpu
 
 ## Examples
 
-### 1. Nominal Mapping (Single Chromosome)
-Run a nominal association test for **chromosome 7** using **4 CPU cores**:
+### 1. Nominal Mapping
+Run a nominal association test for chromosome 7 using 4 CPU cores:
 
 ```bash
 python segmentqtl.py --mode nominal --chromosome 7 --num_cores 4 \
@@ -74,7 +74,7 @@ python segmentqtl.py --mode nominal --chromosome 7 --num_cores 4 \
 ```
 
 ### 2. Permutation-Based Mapping
-Perform **5,000 permutations** using the **beta approximation method** on **chromosome X** with **8 CPU cores**:
+Perform 5,000 permutations using the beta approximation method on chromosome X with 8 CPU cores:
 
 ```bash
 python segmentqtl.py --mode perm --chromosome X --num_permutations 5000 \
