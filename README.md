@@ -78,7 +78,10 @@ Perform 5,000 permutations using the beta approximation method on chromosome X w
 
 ```bash
 python segmentqtl.py --mode perm --chromosome X --num_permutations 5000 \
-    --perm_method beta --num_cores 8 --out_dir results/
+    --perm_method beta --num_cores 8
+    --genotypes path/to/genotypes --quantifications path/to/quantifications.csv \
+    --covariates path/to/covariates.csv --copynumber path/to/copynumber.csv \
+    --segmentation path/to/segmentation.csv --out_dir results/
 ```
 
 ### 3. FDR Correction
@@ -86,24 +89,32 @@ python segmentqtl.py --mode perm --chromosome X --num_permutations 5000 \
 Apply false discovery rate (FDR) correction to previously computed results:
 
 ```bash
-python segmentqtl.py --mode fdr --fdr_out corrected_results.csv
+python segmentqtl.py --mode fdr --out_dir path/to/computedRes --fdr_out corrected_results.csv
 ```
 
-### 4. Testing All Variants for a Specific Gene
+### 4. Testing All Variants for a Specific Phenotype
 
-Run SegmentQTL for all variants of a given gene (e.g., TP53):
+Run SegmentQTL for all variants of a given phenotype id (e.g., gene TP53):
 
 ```bash
-python segmentqtl.py --mode nominal --chromosome 17 --all_variants TP53 \
-    --num_cores 1 --out_dir results/
+python segmentqtl.py --mode nominal --all_variants TP53 \
+    --chromosome 17 --num_cores 4 \
+    --genotypes path/to/genotypes --quantifications path/to/quantifications.csv \
+    --covariates path/to/covariates.csv --copynumber path/to/copynumber.csv \
+    --segmentation path/to/segmentation.csv --out_dir results/
 ```
+This option work with nominal and permutation mode. Using --all_variants option without specifying phenotype id runs the whole chromosome.
 
 ### 5. Generating Plots for Significant Associations
 
 Generate plots for all associations with p-values below 0.05:
 
 ```bash
-python segmentqtl.py --mode nominal --plot_threshold 0.05 --plot_dir plots/
+python segmentqtl.py --mode nominal --plot_threshold 0.05 --plot_dir plots/ \
+    --chromosome 7 --num_cores 4 \
+    --genotypes path/to/genotypes --quantifications path/to/quantifications.csv \
+    --covariates path/to/covariates.csv --copynumber path/to/copynumber.csv \
+    --segmentation path/to/segmentation.csv --out_dir results/
 ```
 
 
