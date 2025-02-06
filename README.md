@@ -53,7 +53,7 @@ SegmentQTL is executed via the command line with various options to control inpu
 - `--out_dir`  
   - Directory where results are saved.
 - `--fdr_out`  
-  - File path for saving FDR-corrected results.
+  - File path for saving FDR-corrected results. Must have .csv file extension.
 - `--plot_threshold`  
   - P-value threshold for generating plots (`-1` disables plotting).
 - `--plot_dir`  
@@ -78,7 +78,7 @@ Perform 5,000 permutations using the beta approximation method on chromosome X w
 
 ```bash
 python segmentqtl.py --mode perm --chromosome X --num_permutations 5000 \
-    --perm_method beta --num_cores 8
+    --perm_method beta --num_cores 8 \
     --genotypes path/to/genotypes --quantifications path/to/quantifications.csv \
     --covariates path/to/covariates.csv --copynumber path/to/copynumber.csv \
     --segmentation path/to/segmentation.csv --out_dir results/
