@@ -41,7 +41,7 @@ SegmentQTL is executed via the command line with various options to control inpu
 
 ### Optional Arguments:
 - `--all_variants`  
-  - Test all variants for a given gene. Provide a gene ID or use without a value to process all genes.
+  - Test all variants for a given phenotype. Provide a phenotype ID or use without a value to process all phenotypes.
 - `--perm_method`  
   - Method used for permutation (`beta` or `direct`).
 - `--num_permutations`  
@@ -103,7 +103,7 @@ python segmentqtl.py --mode nominal --all_variants TP53 \
     --covariates path/to/covariates.csv --copynumber path/to/copynumber.csv \
     --segmentation path/to/segmentation.csv --out_dir results/
 ```
-This option work with nominal and permutation mode. Using --all_variants option without specifying phenotype id runs the whole chromosome.
+This option work with nominal and permutation mode.
 
 ### 5. Generating Plots for Significant Associations
 
