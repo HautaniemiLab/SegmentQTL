@@ -2,7 +2,7 @@ from glob import glob
 from os import path
 
 import pandas as pd
-from statsmodels.stats.multitest import multipletests
+import scipy.stats
 
 
 def combine_chromosome(outdir: str):
@@ -29,7 +29,7 @@ def combine_chromosome(outdir: str):
     return combined_df
 
 
-def fdr(outdir: str, threshold: float):
+def fdr(outdir: str):
     """
     Perform Benjamini Hochberg false discovery rate correction to mapping results.
 
@@ -42,6 +42,6 @@ def fdr(outdir: str, threshold: float):
     """
     full_res = combine_chromosome(outdir)
     perm_pvals = full_res["p_adj"]
-    _, bh_p_values, _, _ = multipletests(perm_pvals, method="fdr_bh", alpha=threshold)
+    bh_p_values = scipy.stats.false_discovery_control(perm_pvals)
     full_res["fdr"] = bh_p_values
     return full_res

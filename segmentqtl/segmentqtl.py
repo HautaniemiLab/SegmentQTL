@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-
 from argparse import ArgumentParser
 from os import makedirs, path
 
@@ -67,7 +65,7 @@ def main():
     parser.add_argument(
         "--num_permutations",
         type=int,
-        default=10000,
+        default=8000,
         help="Number of permutations to be run on each phenotype",
     )
     parser.add_argument(
@@ -79,13 +77,13 @@ def main():
     parser.add_argument(
         "--num_cores",
         type=int,
-        default=1,
+        default=5,
         help="Number of cores to be used in the computation",
     )
     parser.add_argument(
         "--out_dir",
         type=str,
-        default="../1MnewBetaApproxResultsNumPerm10000/",
+        default="test/",
         help="Directory where intermediate results are saved",
     )
     parser.add_argument(
@@ -93,12 +91,6 @@ def main():
         type=str,
         default="../fdr_corrected_res.csv",
         help="File path to which fdr corrected full results are saved to. Must be a csv file.",
-    )
-    parser.add_argument(
-        "--threshold",
-        type=float,
-        default=0.01,
-        help="Threshold value for fdr cutoff.",
     )
     parser.add_argument(
         "--plot_threshold",
@@ -177,12 +169,7 @@ def main():
 
     elif mode == "fdr":
         out_path = args.fdr_out
-        threshold = args.threshold
-        fdr_corrected_res = fdr(out_dir, threshold)
+        fdr_corrected_res = fdr(out_dir)
         fdr_corrected_res.to_csv(out_path, index=False)
     else:
         print(f"Invalid mode: {mode}, please select nominal, perm, or fdr.")
-
-
-if __name__ == "__main__":
-    main()
