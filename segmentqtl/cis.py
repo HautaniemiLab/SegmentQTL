@@ -1,11 +1,10 @@
-#!/usr/bin/env python
-
-from multiprocessing import Pool, set_start_method
+from multiprocessing import Pool
 from os import path
 from time import time
 
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 from plotting_utils import box_and_whisker
 from statistical_utils import (
@@ -212,7 +211,6 @@ class Cis:
         - actual_associations: Dataframe of association testing results for a gene.
             When > 0 permutations are used, also adjusted p-values are provided.
         """
-        # Perform nominal association testing for the actual data
         actual_associations = self.gene_variant_regressions(
             gene_index, self.quan, variant, regression_data
         )
@@ -229,19 +227,17 @@ class Cis:
 
             for index in range(self.num_permutations):
                 # Perform association testing with the permuted gene index
-                perm_data = self.permutation_data(
+                perm_gex, perm_genotypes = self.permutation_data(
                     gene_index, perm_indices[index], transf_variants, variant
                 )
-
-                perm_gex, perm_genotypes = residualize(perm_data)
 
                 r_perm = np.corrcoef(perm_gex, perm_genotypes)[0, 1]
 
                 r2_perm[index] = r_perm**2
 
-            nom_gex, nom_genotypes = residualize(regression_data)
-
-            nominal_r = np.corrcoef(nom_gex, nom_genotypes)[0, 1]
+            nominal_r = np.corrcoef(
+                regression_data["GEX"], regression_data["cur_genotypes"]
+            )[0, 1]
             nominal_r2 = np.power(nominal_r, 2)
 
             # Adjust p-values using beta approximation
@@ -250,26 +246,22 @@ class Cis:
         else:
             permuted_correlations = []
 
-            # In direct scheme, permute whole dataset
+            # In direct scheme, permute the whole dataset
             for index in range(self.full_quan.shape[0]):
-                perm_data = self.permutation_data(
+                perm_gex, perm_genotypes = self.permutation_data(
                     gene_index, index, transf_variants, variant
                 )
 
-                residualized_data = residualize(perm_data)
-
-                perm_corr = np.corrcoef(
-                    residualized_data["cur_genotypes"], residualized_data["GEX"]
-                )[0, 1]
+                perm_corr = np.corrcoef(perm_gex, perm_genotypes)[0, 1]
                 permuted_correlations.append(perm_corr)
 
-            actual_corr = np.corrcoef(
-                regression_data["cur_genotypes"], regression_data["GEX"]
+            nominal_corr = np.corrcoef(
+                regression_data["GEX"], regression_data["cur_genotypes"]
             )[0, 1]
 
             permuted_correlations = np.array(permuted_correlations)
             adjusted_p_value = (
-                np.sum(np.abs(permuted_correlations) > np.abs(actual_corr))
+                np.sum(np.abs(permuted_correlations) > np.abs(nominal_corr))
                 / self.full_quan.shape[0]
             )
 
@@ -298,7 +290,8 @@ class Cis:
         - variant: Variant ID
 
         Returns:
-        - perm_data: Dataframe of data linked with the fixed variant and permuted gene
+        - perm_gex, perm_genotypes: Arrays of residualized permuted phenotype levels
+            and residualized fixed genotype values
         """
         if not variant:
             return pd.DataFrame()
@@ -335,7 +328,9 @@ class Cis:
 
         perm_data = pd.DataFrame(data_dict)
 
-        return perm_data
+        perm_gex, perm_genotypes = residualize(perm_data)
+
+        return perm_gex, perm_genotypes
 
     def check_grouping(self, cur_genotypes_filtered: np.ndarray):
         """
@@ -347,7 +342,7 @@ class Cis:
         Returns:
         - Boolean value showing if there are enough instances in the different genotype groups.
         """
-        bins = [0, 0.34, 0.67, 1]
+        bins = [-10, 0.34, 0.67, 1]
         genotype_groups = pd.cut(cur_genotypes_filtered, bins=bins, include_lowest=True)
         group_counts = genotype_groups.value_counts()
 
@@ -484,7 +479,16 @@ class Cis:
                 data_best_corr = pd.DataFrame(data_dict)
                 best_variant = variant_index
 
-        return best_variant, data_best_corr
+        nom_gex, nom_genotypes = residualize(data_best_corr)
+
+        residualized_data = pd.DataFrame(
+            {
+                "GEX": nom_gex,
+                "cur_genotypes": nom_genotypes,
+            }
+        )
+
+        return best_variant, residualized_data
 
     def data_all_variants(
         self,
@@ -521,7 +525,18 @@ class Cis:
         for covariate, cov_value_filtered in zip(self.cov.index, cov_values_filtered):
             data_dict[covariate] = cov_value_filtered
 
-        return pd.DataFrame(data_dict)
+        df_data = pd.DataFrame(data_dict)
+
+        nom_gex, nom_genotypes = residualize(df_data)
+
+        residualized_regression_data = pd.DataFrame(
+            {
+                "GEX": nom_gex,
+                "cur_genotypes": nom_genotypes,
+            }
+        )
+
+        return residualized_regression_data
 
     def process_all_variants(self, gene_index: int, transf_variants: pd.DataFrame):
         """
@@ -598,7 +613,7 @@ class Cis:
 
         def create_association(gene, variant, slope, slope_se, p_value):
             return {
-                "gene": gene,
+                "phenotype": gene,
                 "variant": variant,
                 "number_of_samples": regression_data.shape[0],
                 "slope": slope,
@@ -612,20 +627,13 @@ class Cis:
             )
             return pd.DataFrame(associations)
 
-        gex, genotypes = residualize(regression_data)
+        corr = np.corrcoef(regression_data["GEX"], regression_data["cur_genotypes"])[
+            0, 1
+        ]
 
-        corr = np.corrcoef(gex, genotypes)[0, 1]
+        slope, slope_se = calculate_slope_and_se(regression_data, corr)
 
-        residualized_df = pd.DataFrame(
-            {
-                "GEX": gex,
-                "cur_genotypes": genotypes,
-            }
-        )
-
-        slope, slope_se = calculate_slope_and_se(residualized_df, corr)
-
-        pval = calculate_pvalue(residualized_df, corr)
+        pval = calculate_pvalue(regression_data, corr)
 
         associations.append(
             create_association(current_gene, variant, slope, slope_se, pval)
@@ -651,17 +659,22 @@ class Cis:
 
         limit = self.quan.shape[0]  # For testing, use small number, eg. 3
 
-        set_start_method("spawn")
         pool = Pool(processes=self.num_cores)
 
         # Map the gene indices to the helper function using the Pool
-        full_associations = pool.map(self.calculate_associations_helper, range(limit))
+        # and print the progress
+        full_associations = list(
+            tqdm(
+                pool.imap(self.calculate_associations_helper, range(limit)), total=limit
+            )
+        )
 
         pool.close()
         pool.join()
 
         end = time()
         print("The time of execution: ", (end - start) / 60, " min")
+        print("")
 
         return pd.concat(full_associations)
 
@@ -671,11 +684,10 @@ class Cis:
 
         This function performs several steps to calculate the associations for a
         specific gene index:
-        1. Prints the current progress of the calculation.
-        2. Determines the start and end positions for the gene window.
-        3. Retrieves the variants within the gene window.
-        4. Transforms the variants based on a common segment.
-        5. Performs regressions to calculate associations.
+        1. Determines the start and end positions for the gene window.
+        2. Retrieves the variants within the gene window.
+        3. Transforms the variants based on a common segment.
+        4. Performs regressions to calculate associations.
 
         Parameters:
         - gene_index (int): The index of the gene for which associations are being calculated.
@@ -683,7 +695,6 @@ class Cis:
         Returns:
         - A dataframe containing the association results for the specified gene index.
         """
-        print(gene_index + 1, "/", self.quan.shape[0])
         current_start, current_end = self.start_end_gene_window(gene_index)
         current_variants = self.get_variants_for_gene_window(current_start, current_end)
 
