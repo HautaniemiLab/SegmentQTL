@@ -1,5 +1,4 @@
-# SegmentQTL Documentation
-&nbsp;
+# SegmentQTL documentation
 
 <a id="cis"></a>
 
@@ -154,7 +153,8 @@ permuted.
 
 **Returns**:
 
-  - perm_data: Dataframe of data linked with the fixed variant and permuted gene
+  - perm_gex, perm_genotypes: Arrays of residualized permuted phenotype levels
+  and residualized fixed genotype values
 
 <a id="cis.Cis.check_grouping"></a>
 
@@ -164,7 +164,7 @@ permuted.
 def check_grouping(cur_genotypes_filtered: np.ndarray)
 ```
 
-Find if tail and middle values have adequate representation in data.
+Find if the genotype dosages have adequate variation in the data.
 
 **Arguments**:
 
@@ -360,7 +360,7 @@ specific gene index:
 def combine_chromosome(outdir: str)
 ```
 
-Combine all csv files fro the given directory.
+Combine all csv files from the given directory.
 
 **Arguments**:
 
@@ -376,7 +376,7 @@ Combine all csv files fro the given directory.
 #### fdr
 
 ```python
-def fdr(outdir: str, threshold: float)
+def fdr(outdir: str)
 ```
 
 Perform Benjamini Hochberg false discovery rate correction to mapping results.
@@ -391,7 +391,7 @@ Perform Benjamini Hochberg false discovery rate correction to mapping results.
 
   - full_res: Dataframe with all mapping results including a column for fdr corrected p-values.
 
-<a id="__init__"></a>
+<a id="plotting_utils"></a>
 
 # plotting\_utils
 
@@ -414,6 +414,8 @@ Create a box-and-whisker plot with significance bars and Kruskal-Wallis test for
 
 <a id="segmentqtl"></a>
 
+<a id="statistical_utils"></a>
+
 # statistical\_utils
 
 <a id="statistical_utils.residualize"></a>
@@ -433,7 +435,7 @@ Residualize the GEX and cur_genotypes columns by removing the variance explained
 
 **Returns**:
 
-  - residualized_df: A dataframe with residualized GEX and cur_genotypes.
+  - Residualized GEX and genotypes.
 
 <a id="statistical_utils.get_tstat2"></a>
 
@@ -474,6 +476,125 @@ Calculate the p-value from the t-statistic and degrees of freedom.
 **Returns**:
 
   - p-value
+
+<a id="statistical_utils.get_pvalue_from_corr"></a>
+
+#### get\_pvalue\_from\_corr
+
+```python
+def get_pvalue_from_corr(r2: float, df: int)
+```
+
+Calculate p-value from correlation r2 and degrees of freedom.
+
+**Arguments**:
+
+  - r2: R² value
+  - dof: Degrees of freedom
+  
+
+**Returns**:
+
+  - p-value
+
+<a id="statistical_utils.beta_shape1_from_dof"></a>
+
+#### beta\_shape1\_from\_dof
+
+```python
+def beta_shape1_from_dof(r2_values: np.ndarray, dof: float)
+```
+
+Estimate Beta shape1 parameter from moment matching.
+
+**Arguments**:
+
+  - r2_perm: Array of permutation R² values
+  - dof: Optimized degrees of freedom
+
+<a id="statistical_utils.beta_log_likelihood"></a>
+
+#### beta\_log\_likelihood
+
+```python
+def beta_log_likelihood(pvals: np.ndarray, shape1: float, shape2: float)
+```
+
+Negative log-likelihood for the Beta distribution.
+
+**Arguments**:
+
+  - pvals : Array of permutation p-values
+  - shape1 : Beta shape parameter 1
+  - shape2 : Beta shape parameter 2
+  
+  Returns
+  - The negative log-likelihood of the observed p-values given the
+  specified Beta distribution parameters
+
+<a id="statistical_utils.optimize_dof"></a>
+
+#### optimize\_dof
+
+```python
+def optimize_dof(r2_perm: np.ndarray, dof_init: int, tol=1e-4)
+```
+
+Optimize degrees of freedom such that Beta shape1 ≈ 1.
+
+**Arguments**:
+
+  - r2_perm: Array of permutation R² values
+  - dof_init: Initial value of degrees of freedom
+  - tol: Tolerance level
+  
+  Returns
+  - Optimized degrees of freedom
+
+<a id="statistical_utils.fit_beta_parameters"></a>
+
+#### fit\_beta\_parameters
+
+```python
+def fit_beta_parameters(r2_perm: np.ndarray, dof: float)
+```
+
+Fit Beta distribution parameters to permutation p-values.
+
+**Arguments**:
+
+  - r2_perm: Array of permutation R² values
+  - dof: Optimized degrees of freedom
+  
+
+**Returns**:
+
+  - Beta shape parameters 1 and 2
+
+<a id="statistical_utils.adjust_p_values"></a>
+
+#### adjust\_p\_values
+
+```python
+def adjust_p_values(r2_perm: np.ndarray,
+                    r2_nominal: float,
+                    dof_init=10,
+                    tol=1e-4)
+```
+
+Calculate Beta-approximated p-values from permutation results.
+
+**Arguments**:
+
+  - r2_perm: Array of permutation R² values
+  - r2_nominal: The nominal R² value
+  - dof_init: Initial value of degrees of freedom
+  - tol: Tolerance level
+  
+
+**Returns**:
+
+  - The permutation adjusted p-value
 
 <a id="statistical_utils.get_slope"></a>
 
@@ -536,46 +657,3 @@ Calculate the p-value using the residualized data and correlation.
 **Returns**:
 
 - `pval` - The p-value for testing whether the slope is different from 0.
-
-<a id="statistical_utils.calculate_beta_parameters"></a>
-
-#### calculate\_beta\_parameters
-
-```python
-def calculate_beta_parameters(perm_p_values: np.ndarray)
-```
-
-Calculate beta parameters for the array of p-value obtained from permutations.
-
-**Arguments**:
-
-  - perm_p_values: Array of permutation p-values
-  
-
-**Returns**:
-
-  Tuple of
-  - Beta parameter 1
-  - Beta parameter 2
-
-<a id="statistical_utils.adjust_p_values"></a>
-
-#### adjust\_p\_values
-
-```python
-def adjust_p_values(nominal_p_value: float, beta_shape1: float,
-                    beta_shape2: float)
-```
-
-Adjust p-values for multiple comparisons.
-
-**Arguments**:
-
-  - nominal_p_value: The p-value from nominal pass
-  - beta_shape1: Beta parameter 1
-  - beta_shape2: Beta parameter 2
-  
-
-**Returns**:
-
-  - Adjusted p-value
