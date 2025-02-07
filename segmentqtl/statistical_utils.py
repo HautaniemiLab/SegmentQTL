@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize, newton
@@ -61,21 +59,45 @@ def get_pvalue_from_tstat2(tstat2: float, df: int):
 
 
 def get_pvalue_from_corr(r2: float, df: int):
-    """Calculate p-value from correlation r2 and degrees of freedom."""
+    """Calculate p-value from correlation r2 and degrees of freedom.
+
+    Parameters:
+    - r2: R² value
+    - dof: Degrees of freedom
+
+    Returns:
+    - p-value
+    """
     tstat2 = get_tstat2(np.sqrt(r2), df)
     return f.sf(tstat2, 1, df)
 
 
-def beta_shape1_from_dof(r2_values, dof):
-    """Estimate Beta shape1 parameter from moment matching."""
+def beta_shape1_from_dof(r2_values: np.ndarray, dof: float):
+    """Estimate Beta shape1 parameter from moment matching.
+
+    Parameters:
+    - r2_perm: Array of permutation R² values
+    - dof: Optimized degrees of freedom
+
+    """
     pvals = np.array([get_pvalue_from_corr(r2, dof) for r2 in r2_values])
     mean_p = np.mean(pvals)
     var_p = np.var(pvals)
     return mean_p * (mean_p * (1 - mean_p) / var_p - 1.0)
 
 
-def beta_log_likelihood(pvals, shape1, shape2):
-    """Negative log-likelihood for the Beta distribution."""
+def beta_log_likelihood(pvals: np.ndarray, shape1: float, shape2: float):
+    """Negative log-likelihood for the Beta distribution.
+
+    Parameters:
+    - pvals : Array of permutation p-values
+    - shape1 : Beta shape parameter 1
+    - shape2 : Beta shape parameter 2
+
+    Returns
+    - The negative log-likelihood of the observed p-values given the
+        specified Beta distribution parameters
+    """
     log_beta = loggamma(shape1) + loggamma(shape2) - loggamma(shape1 + shape2)
     return (
         (1.0 - shape1) * np.sum(np.log(pvals))
@@ -84,9 +106,17 @@ def beta_log_likelihood(pvals, shape1, shape2):
     )
 
 
-def optimize_dof(r2_perm, dof_init, tol=1e-4):
+def optimize_dof(r2_perm: np.ndarray, dof_init: int, tol=1e-4):
     """
     Optimize degrees of freedom such that Beta shape1 ≈ 1.
+
+    Parameters:
+    - r2_perm: Array of permutation R² values
+    - dof_init: Initial value of degrees of freedom
+    - tol: Tolerance level
+
+    Returns
+    - Optimized degrees of freedom
     """
 
     def target(log_dof):
@@ -107,9 +137,16 @@ def optimize_dof(r2_perm, dof_init, tol=1e-4):
         return res.x[0]
 
 
-def fit_beta_parameters(r2_perm, dof):
+def fit_beta_parameters(r2_perm: np.ndarray, dof: float):
     """
     Fit Beta distribution parameters to permutation p-values.
+
+    Parameters:
+    - r2_perm: Array of permutation R² values
+    - dof: Optimized degrees of freedom
+
+    Returns:
+    - Beta shape parameters 1 and 2
     """
     pvals = np.array([get_pvalue_from_corr(r2, dof) for r2 in r2_perm])
     mean_p, var_p = np.mean(pvals), np.var(pvals)
@@ -125,18 +162,26 @@ def fit_beta_parameters(r2_perm, dof):
         method="Nelder-Mead",
     )
     beta_shape1, beta_shape2 = res.x
-    return beta_shape1, beta_shape2, pvals
+    return beta_shape1, beta_shape2
 
 
-def adjust_p_values(r2_perm, r2_nominal, dof_init=10, tol=1e-4):
+def adjust_p_values(r2_perm: np.ndarray, r2_nominal: float, dof_init=10, tol=1e-4):
     """
     Calculate Beta-approximated p-values from permutation results.
+
+    Parameters:
+    - r2_perm: Array of permutation R² values
+    - r2_nominal: The nominal R² value
+    - dof_init: Initial value of degrees of freedom
+    - tol: Tolerance level
+
+    Returns:
+    - The permutation adjusted p-value
+
     """
-    # Optimize DOF
     optimized_dof = optimize_dof(r2_perm, dof_init, tol)
 
-    # Fit Beta parameters
-    beta_shape1, beta_shape2, pvals_perm = fit_beta_parameters(r2_perm, optimized_dof)
+    beta_shape1, beta_shape2 = fit_beta_parameters(r2_perm, optimized_dof)
 
     # Calculate p-value for nominal r2
     pval_nominal = get_pvalue_from_corr(r2_nominal, optimized_dof)
