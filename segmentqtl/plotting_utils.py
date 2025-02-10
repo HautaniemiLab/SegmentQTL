@@ -1,20 +1,20 @@
-import os
+from os import makedirs, path
 
+import matplotlib.pyplot as plt
 import pandas as pd
-import plotly.graph_objects as go
 from scipy import stats
 
 
 def box_and_whisker(df: pd.DataFrame, gene_name: str, variant: str, output_folder: str):
     """
-    Create a box-and-whisker plot with significance bars and Kruskal-Wallis test for grouped data using plotly.
+    Create a box-and-whisker plot with significance bars and Kruskal-Wallis test for grouped data.
 
     Parameters:
     - df: Dataframe containing 'GEX' and 'cur_genotypes' columns.
     - gene_name: Name of the gene that is used for the plot title and file name.
     - output_folder: Path to the folder where the plot should be saved.
     """
-    bins = [0, 0.34, 0.67, 1]
+    bins = [-10, 0.34, 0.67, 1]
     df["Dosage"] = pd.cut(df["cur_genotypes"], bins=bins, include_lowest=True)
 
     grouped_data = [
@@ -23,35 +23,28 @@ def box_and_whisker(df: pd.DataFrame, gene_name: str, variant: str, output_folde
     ]
 
     xticklabels = [str(category) for category in df["Dosage"].cat.categories]
+    ax = plt.axes()
+    bp = ax.boxplot(grouped_data, widths=0.6, patch_artist=False)
 
-    # Create the box plot using plotly
-    fig = go.Figure()
+    ax.set_title(gene_name, fontsize=14)
+    ax.set_ylabel("Expression (log(TMM + 1))")
+    ax.set_xticklabels(xticklabels)
+    ax.tick_params(axis="x", which="major", length=0)
 
-    for i, data in enumerate(grouped_data):
-        fig.add_trace(
-            go.Box(y=data, boxmean="sd", name=xticklabels[i], marker_color="lightblue")
-        )
+    plt.setp(bp["medians"], color="k")
 
-    fig.update_layout(
-        title=gene_name,
-        yaxis_title="Expression (log(TMM + 1))",
-        xaxis_title="Dosage",
-        showlegend=False,
-    )
-
-    # Perform Kruskal-Wallis test
     _, kruskal_p = stats.kruskal(*grouped_data)
-    fig.add_annotation(
-        x=0.5,
-        y=-0.15,
-        text=f"Kruskal-Wallis p = {kruskal_p:.3g}",
-        showarrow=False,
-        font=dict(size=12),
-        xref="paper",
-        yref="paper",
+    ax.text(
+        0,
+        -0.1,
+        f"Kruskal-Wallis p = {kruskal_p:.3g}",
+        transform=ax.transAxes,
+        fontsize=12,
+        va="top",
+        ha="left",
     )
 
-    # Check pairwise significance using Mann-Whitney U test
+    # Check pairwise significance
     significant_combinations = []
     ls = list(range(1, len(grouped_data) + 1))
     combinations = [
@@ -61,54 +54,59 @@ def box_and_whisker(df: pd.DataFrame, gene_name: str, variant: str, output_folde
     for c in combinations:
         data1 = grouped_data[c[0] - 1]
         data2 = grouped_data[c[1] - 1]
-        _, p = stats.mannwhitneyu(data1, data2, alternative="two-sided")
-        significant_combinations.append([c, p])
 
-    # Annotate significance bars
-    yrange = max([max(data) for data in grouped_data]) - min(
-        [min(data) for data in grouped_data]
-    )
+        # Check if either group is empty
+        if len(data1) == 0 or len(data2) == 0:
+            significant_combinations.append(
+                [c, None]
+            )  # No comparison if one of the groups is empty
+        else:
+            _, p = stats.mannwhitneyu(data1, data2, alternative="two-sided")
+            significant_combinations.append([c, p])
+
+    bottom, top = ax.get_ylim()
+    all_data = [item for sublist in grouped_data for item in sublist]
+    max_data_point = max(all_data)
+    min_data_point = min(all_data)
+    ax.set_ylim(min_data_point - 0.1, max_data_point + 1)
+
+    yrange = ax.get_ylim()[1] - ax.get_ylim()[0]
+
+    # Plot significance bars
     for i, significant_combination in enumerate(significant_combinations):
         x1 = significant_combination[0][0]
         x2 = significant_combination[0][1]
-        level = len(significant_combinations) - i
-        bar_height = yrange * (0.08 + 0.05 * level)
-        bar_tips = bar_height - (yrange * (0.0001 + 0.5))
 
-        fig.add_trace(
-            go.Scatter(
-                x=[x1, x1, x2, x2],
-                y=[bar_tips, bar_height, bar_height, bar_tips],
-                mode="lines",
-                line=dict(color="black"),
-                showlegend=False,
-            )
+        # Skip if no p-value (i.e., one of the groups was empty)
+        if significant_combination[1] is None:
+            continue
+
+        level = len(significant_combinations) - i
+        spacing_factor = 0.05
+        bar_height = (yrange * (0.08 + spacing_factor * level)) + top
+        bar_tips = bar_height - (yrange * (0.0001 + spacing_factor * 0.5))
+
+        plt.plot(
+            [x1, x1, x2, x2], [bar_tips, bar_height, bar_height, bar_tips], lw=1, c="k"
         )
         p = significant_combination[1]
-        fig.add_annotation(
-            x=(x1 + x2) * 0.5,
-            y=bar_height + (yrange * 0.01),
-            text=f"p = {p:.3g}",
-            showarrow=False,
-            font=dict(size=7),
+        plt.text(
+            (x1 + x2) * 0.5,
+            bar_height + (yrange * 0.01),
+            f"p = {p:.3g}",
+            ha="center",
+            fontsize=7,
         )
 
     # Annotate sample size below each box
     for i, dataset in enumerate(grouped_data):
         sample_size = len(dataset)
-        fig.add_annotation(
-            x=i,
-            y=-0.1,
-            text=f"n = {sample_size}",
-            showarrow=False,
-            font=dict(size=8),
-            xref="x",
-            yref="y",
-        )
+        ax.text(i + 1, bottom, rf"n = {sample_size}", ha="center", size="x-small")
 
-    # Save the plot to a file
-    if not os.path.exists(output_folder):
-        os.makedirs(output_folder)
+    if not path.exists(output_folder):
+        makedirs(output_folder)
 
-    filename = os.path.join(output_folder, f"{gene_name}_{variant}.html")
-    fig.write_html(filename)
+    plt.autoscale(axis="y")
+    filename = path.join(output_folder, f"{gene_name}_{variant}.png")
+    plt.savefig(filename, dpi=300)
+    plt.clf()
