@@ -31,7 +31,7 @@ SegmentQTL is executed via the command line with various options to control inpu
 - `--genotypes`  
   - Path to genotype data directory.
 - `--quantifications`  
-  - Path to CSV file containing phenotype quantifications (e.g., gene expression).
+  - Path to CSV file containing phenotype quantifications (e.g., gene expression). Note: Provide file with quantification for whole genome. This is needed for reliable permutations even if SegmentQTL processes one chromosome at a time.
 - `--covariates`  
   - Path to CSV file with sample level covariate data.
 - `--copynumber`  
