@@ -218,6 +218,17 @@ class Cis:
         if self.num_permutations == 0:
             return actual_associations
 
+        if regression_data.shape[0] == 0:
+            actual_associations["p_adj"] = np.nan
+            return actual_associations
+
+        nom_gex, nom_genotypes = residualize(regression_data)
+
+        nominal_r = np.corrcoef(
+            nom_gex,
+            nom_genotypes,
+        )[0, 1]
+
         if self.perm_method == "beta":
             perm_indices = np.random.choice(
                 range(self.full_quan.shape[0]), self.num_permutations, replace=False
@@ -227,17 +238,16 @@ class Cis:
 
             for index in range(self.num_permutations):
                 # Perform association testing with the permuted gene index
-                perm_gex, perm_genotypes = self.permutation_data(
+                perm_data = self.permutation_data(
                     gene_index, perm_indices[index], transf_variants, variant
                 )
+
+                perm_gex, perm_genotypes = residualize(perm_data)
 
                 r_perm = np.corrcoef(perm_gex, perm_genotypes)[0, 1]
 
                 r2_perm[index] = r_perm**2
 
-            nominal_r = np.corrcoef(
-                regression_data["GEX"], regression_data["cur_genotypes"]
-            )[0, 1]
             nominal_r2 = np.power(nominal_r, 2)
 
             # Adjust p-values using beta approximation
@@ -248,20 +258,23 @@ class Cis:
 
             # In direct scheme, permute the whole dataset
             for index in range(self.full_quan.shape[0]):
-                perm_gex, perm_genotypes = self.permutation_data(
-                    gene_index, index, transf_variants, variant
+                perm_data = self.permutation_data(
+                    gene_index, perm_indices[index], transf_variants, variant
                 )
+
+                perm_gex, perm_genotypes = residualize(perm_data)
 
                 perm_corr = np.corrcoef(perm_gex, perm_genotypes)[0, 1]
                 permuted_correlations.append(perm_corr)
 
-            nominal_corr = np.corrcoef(
-                regression_data["GEX"], regression_data["cur_genotypes"]
+            nominal_r = np.corrcoef(
+                regression_data["GEX"],
+                regression_data["cur_genotypes"],
             )[0, 1]
 
             permuted_correlations = np.array(permuted_correlations)
             adjusted_p_value = (
-                np.sum(np.abs(permuted_correlations) > np.abs(nominal_corr))
+                np.sum(np.abs(permuted_correlations) > np.abs(nominal_r))
                 / self.full_quan.shape[0]
             )
 
@@ -328,9 +341,7 @@ class Cis:
 
         perm_data = pd.DataFrame(data_dict)
 
-        perm_gex, perm_genotypes = residualize(perm_data)
-
-        return perm_gex, perm_genotypes
+        return perm_data
 
     def check_grouping(self, cur_genotypes_filtered: np.ndarray):
         """
@@ -342,7 +353,7 @@ class Cis:
         Returns:
         - Boolean value showing if there are enough instances in the different genotype groups.
         """
-        bins = [-10, 0.34, 0.67, 1]
+        bins = [-0.01, 0.34, 0.67, 1]
         genotype_groups = pd.cut(cur_genotypes_filtered, bins=bins, include_lowest=True)
         group_counts = genotype_groups.value_counts()
 
@@ -479,16 +490,7 @@ class Cis:
                 data_best_corr = pd.DataFrame(data_dict)
                 best_variant = variant_index
 
-        nom_gex, nom_genotypes = residualize(data_best_corr)
-
-        residualized_data = pd.DataFrame(
-            {
-                "GEX": nom_gex,
-                "cur_genotypes": nom_genotypes,
-            }
-        )
-
-        return best_variant, residualized_data
+        return best_variant, data_best_corr
 
     def data_all_variants(
         self,
@@ -527,16 +529,7 @@ class Cis:
 
         df_data = pd.DataFrame(data_dict)
 
-        nom_gex, nom_genotypes = residualize(df_data)
-
-        residualized_regression_data = pd.DataFrame(
-            {
-                "GEX": nom_gex,
-                "cur_genotypes": nom_genotypes,
-            }
-        )
-
-        return residualized_regression_data
+        return df_data
 
     def process_all_variants(self, gene_index: int, transf_variants: pd.DataFrame):
         """
@@ -627,13 +620,23 @@ class Cis:
             )
             return pd.DataFrame(associations)
 
-        corr = np.corrcoef(regression_data["GEX"], regression_data["cur_genotypes"])[
-            0, 1
-        ]
+        residualized_gex, residualized_genotypes = residualize(regression_data)
 
-        slope, slope_se = calculate_slope_and_se(regression_data, corr)
+        residualized_regression_data = pd.DataFrame(
+            {
+                "GEX": residualized_gex,
+                "cur_genotypes": residualized_genotypes,
+            }
+        )
 
-        pval = calculate_pvalue(regression_data, corr)
+        corr = np.corrcoef(
+            residualized_regression_data["GEX"],
+            residualized_regression_data["cur_genotypes"],
+        )[0, 1]
+
+        slope, slope_se = calculate_slope_and_se(residualized_regression_data, corr)
+
+        pval = calculate_pvalue(residualized_regression_data, corr)
 
         associations.append(
             create_association(current_gene, variant, slope, slope_se, pval)

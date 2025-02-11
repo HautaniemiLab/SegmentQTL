@@ -14,7 +14,7 @@ def box_and_whisker(df: pd.DataFrame, gene_name: str, variant: str, output_folde
     - gene_name: Name of the gene that is used for the plot title and file name.
     - output_folder: Path to the folder where the plot should be saved.
     """
-    bins = [-10, 0.34, 0.67, 1]
+    bins = [0, 0.34, 0.67, 1]
     df["Dosage"] = pd.cut(df["cur_genotypes"], bins=bins, include_lowest=True)
 
     grouped_data = [
