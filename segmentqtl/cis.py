@@ -4,8 +4,6 @@ from time import time
 
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
-
 from plotting_utils import box_and_whisker
 from statistical_utils import (
     adjust_p_values,
@@ -13,6 +11,7 @@ from statistical_utils import (
     calculate_slope_and_se,
     residualize,
 )
+from tqdm import tqdm
 
 
 class Cis:
@@ -706,7 +705,7 @@ class Cis:
         )
 
         if self.all_variants_mode:
-            return self.process_all_variants(gene_index, transf_variants)
+            result = self.process_all_variants(gene_index, transf_variants)
         else:
             best_variant, data_best_corr = self.best_variant_data(
                 gene_index, transf_variants, self.quan
@@ -729,4 +728,6 @@ class Cis:
                         data_best_corr, gene_name, best_variant, self.plot_dir
                     )
 
-            return association_res
+            result = association_res
+
+        return result
