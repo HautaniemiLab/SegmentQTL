@@ -67,7 +67,7 @@ SegmentQTL is executed via the command line with various options to control inpu
 Run a nominal association test for chromosome 7 using 4 CPU cores:
 
 ```bash
-python segmentqtl.py --mode nominal --chromosome 7 --num_cores 4 \
+python __main__.py --mode nominal --chromosome 7 --num_cores 4 \
     --genotypes path/to/genotypes --quantifications path/to/quantifications.csv \
     --covariates path/to/covariates.csv --copynumber path/to/copynumber.csv \
     --segmentation path/to/segmentation.csv --out_dir results/
@@ -77,7 +77,7 @@ python segmentqtl.py --mode nominal --chromosome 7 --num_cores 4 \
 Perform 5,000 permutations using the beta approximation method on chromosome X with 8 CPU cores:
 
 ```bash
-python segmentqtl.py --mode perm --chromosome X --num_permutations 5000 \
+python __main__.py --mode perm --chromosome X --num_permutations 5000 \
     --perm_method beta --num_cores 8 \
     --genotypes path/to/genotypes --quantifications path/to/quantifications.csv \
     --covariates path/to/covariates.csv --copynumber path/to/copynumber.csv \
@@ -89,7 +89,7 @@ python segmentqtl.py --mode perm --chromosome X --num_permutations 5000 \
 Apply false discovery rate (FDR) correction to previously computed results:
 
 ```bash
-python segmentqtl.py --mode fdr --out_dir path/to/computedRes --fdr_out corrected_results.csv
+python __main__.py --mode fdr --out_dir path/to/computedRes --fdr_out corrected_results.csv
 ```
 
 ### 4. Testing All Variants for a Specific Phenotype
@@ -97,7 +97,7 @@ python segmentqtl.py --mode fdr --out_dir path/to/computedRes --fdr_out correcte
 Run SegmentQTL for all variants of a given phenotype id (e.g., gene TP53):
 
 ```bash
-python segmentqtl.py --mode nominal --all_variants TP53 \
+python __main__.py --mode nominal --all_variants TP53 \
     --chromosome 17 --num_cores 4 \
     --genotypes path/to/genotypes --quantifications path/to/quantifications.csv \
     --covariates path/to/covariates.csv --copynumber path/to/copynumber.csv \
@@ -110,7 +110,7 @@ This option work with nominal and permutation mode.
 Generate plots for all associations with p-values below 0.05:
 
 ```bash
-python segmentqtl.py --mode nominal --plot_threshold 0.05 --plot_dir plots/ \
+python __main__.py --mode nominal --plot_threshold 0.05 --plot_dir plots/ \
     --chromosome 7 --num_cores 4 \
     --genotypes path/to/genotypes --quantifications path/to/quantifications.csv \
     --covariates path/to/covariates.csv --copynumber path/to/copynumber.csv \
