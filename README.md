@@ -178,8 +178,9 @@ The primary output file of SegmentQTL is a CSV containing gene-variant associati
 | `slope`              | Estimated regression coefficient (effect size) for the genotype–phenotype association. |
 | `slope_se`           | Standard error of the slope estimate.                                                  |
 | `nominal_p`          | P-value from the nominal association test.                                             |
-| `p_adj`              | Adjusted p-value after correction via FDR.                                             |
+| `p_adj`              | Permutation adjusted p-value.                                                          |
 | `chr`                | Chromosome where the gene and variant are located.                                     |
+| `fdr`                | FDR corrected p-value.                                                                 |
 
 
 ---
