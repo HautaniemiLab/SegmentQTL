@@ -59,6 +59,111 @@ SegmentQTL is executed via the command line with various options to control inpu
 - `--plot_dir`  
   - Directory for saving generated plots.
  
+## Input File Formats
+
+SegmentQTL requires five main input files: genotypes, quantifications, covariates, copy number data, and segmentation information. Below are the required formats and examples for each input.
+
+---
+
+#### 1. Genotype Files (Per-Chromosome CSVs)
+
+The `--genotypes` argument should point to a directory containing per-chromosome genotype files, typically named chr1.csv, chr2.csv, ..., chr22.csv, chrX.csv
+
+Each file corresponds to one chromosome and contains genotype dosages for multiple samples.
+
+##### **Required Columns:**
+- **`ID`**: Variant identifier in the format `chr:pos:ref:alt` (e.g., `chr8:123456:A:G`).
+- **`<sample1>`**, **`<sample2>`**, ...: Sample-specific dosage values. Dosages are continuous values between `0` and `1`.
+
+##### **Example File Format (chr8.csv):**
+
+| ID                | sample1 | sample2 | sample3 |
+|-------------------|---------|---------|---------|
+| chr8:123456:A:G   | 0.32    | 0.45    | 0.10    |
+| chr8:123789:T:C   | 0.76    | 0.88    | 0.34    |
+| chr8:124000:G:T   | 0.00    | 0.05    | 0.50    |
+
+---
+
+#### 2. Phenotype Quantifications (CSV)
+
+The `--quantifications` argument should point to a CSV file containing normalized phenotype levels (e.g., gene expression) for all samples across the genome.
+
+##### **Required Columns:**
+- **`chr`**: Chromosome where the phenotype is located (e.g., `chr1`, `chrX`).
+- **`start`**: Start position of the phenotype.
+- **`end`**: End position of the phenotype.
+- **`gene_id`**: Unique identifier for the phenotype (e.g., Ensembl gene ID).
+
+##### **Additional Columns:**
+- **`<sample1>`**, **`<sample2>`**, ...: Normalized phenotype values per sample.
+
+##### **Example File Format:**
+
+| chr    | start   | end     | gene_id       | sample1 | sample2 | sample3 |
+|--------|---------|---------|---------------|---------|---------|---------|
+| chr8   | 123000  | 124000  | ENSG00000123  | 1.21    | 0.98    | 1.34    |
+| chr8   | 130000  | 132000  | ENSG00000456  | 0.87    | 1.05    | 0.92    |
+
+**Note**: Provide quantifications for the **entire genome**, even if only one chromosome is analyzed at a time. This ensures correct permutation testing and FDR correction.
+
+---
+
+#### 3. Covariate File (CSV)
+
+The `--covariates` argument should point to a CSV file containing covariate values for each sample. First row has `n` entries (samples); subsequent rows have `n + 1` entries (covariate name + values).
+
+##### **Structure:**
+- **Row 1**: Sample IDs only (e.g., `sample1,sample2,sample3`)
+- **Row 2+**: First cell is the covariate name, followed by values for each sample.
+
+##### **Example File Format:**
+
+|         | sample1 | sample2 | sample3 |
+|---------|---------|---------|---------|
+| batch   | 1       | 1       | 2       |
+| purity  | 0.95    | 0.88    | 0.91    |
+
+---
+
+#### 4. Copy Number File (CSV)
+
+The `--copynumber` argument should point to a CSV file containing phenotype-level copy number values for each sample.
+
+##### **Required Columns:**
+- **`gene_id`**: Ensembl gene ID or equivalent identifier.
+
+##### **Additional Columns:**
+- **`<sample1>`**, **`<sample2>`**, ...: Copy number values per sample.
+
+##### **Example File Format:**
+
+| gene_id       | sample1 | sample2 | sample3 |
+|---------------|---------|---------|---------|
+| ENSG00000123  | 2.10    | 1.85    | 1.92    |
+| ENSG00000456  | 1.75    | 2.30    | 2.00    |
+
+---
+
+#### 5. Segmentation File (CSV)
+
+The `--segmentation` argument should point to a CSV file with structural segmentation data for each sample. This is used to determine if a variant and gene are on the same intact genomic segment.
+
+##### **Required Columns:**
+- **`sample`**: Sample ID.
+- **`chr`**: Chromosome identifier.
+- **`startpos`**: Start coordinate of the segment.
+- **`endpos`**: End coordinate of the segment.
+
+##### **Example File Format:**
+
+| sample   | chr   | startpos | endpos  |
+|----------|-------|----------|---------|
+| sample1  | chr8  | 100000   | 200000  |
+| sample1  | chr8  | 200001   | 300000  |
+| sample2  | chr8  | 120000   | 250000  |
+
+ 
 ## Output Format
 
 The primary output file of SegmentQTL is a CSV containing gene-variant associations.
