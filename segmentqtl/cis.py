@@ -416,7 +416,6 @@ class Cis:
             len(np.unique(GEX_filtered)) < 2
             or len(np.unique(CN_filtered)) < 2
             or len(np.unique(cur_genotypes_filtered)) < 2
-            or len(np.unique(cov_values_filtered)) < 2
         ):
             return [], [], [], []
 
