@@ -172,7 +172,7 @@ The primary output file of SegmentQTL is a CSV containing gene-variant associati
 
 | Column Name          | Description                                                                            |
 |----------------------|----------------------------------------------------------------------------------------|
-| `gene`               | Gene identifier.                                                                       |
+| `phenotype`          | Phenotype identifier.                                                                  |
 | `variant`            | Variant identifier.                                                                    |
 | `number_of_samples`  | Effective number of samples used in the association test after the segment filtering.  |
 | `slope`              | Estimated regression coefficient (effect size) for the genotype–phenotype association. |
