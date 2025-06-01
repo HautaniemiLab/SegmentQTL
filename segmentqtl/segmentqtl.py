@@ -16,37 +16,31 @@ def main():
     parser.add_argument(
         "--chromosome",
         type=str,
-        default="21",
         help="Chromosome number or X with or without chr prefix",
     )
     parser.add_argument(
         "--copynumber",
         type=str,
-        default="../segmentQTL_inputs/copynumber.csv",
         help="Path to copynumber CSV file",
     )
     parser.add_argument(
         "--quantifications",
         type=str,
-        default="../segmentQTL_inputs/quantifications.csv",
         help="Path to quantifications CSV file",
     )
     parser.add_argument(
         "--covariates",
         type=str,
-        default="../segmentQTL_inputs/covariates.csv",
         help="Path to covariates CSV file",
     )
     parser.add_argument(
         "--segmentation",
         type=str,
-        default="../segmentQTL_inputs/purple.csv",
         help="Path to file with segmentation data",
     )
     parser.add_argument(
         "--genotypes",
         type=str,
-        default="../segmentQTL_inputs/genotypes",
         help="Path to genotypes directory",
     )
     parser.add_argument(
@@ -77,13 +71,13 @@ def main():
     parser.add_argument(
         "--num_cores",
         type=int,
-        default=5,
+        default=1,
         help="Number of cores to be used in the computation",
     )
     parser.add_argument(
         "--out_dir",
         type=str,
-        default="test/",
+        default="results/",
         help="Directory where intermediate results are saved",
     )
     parser.add_argument(
