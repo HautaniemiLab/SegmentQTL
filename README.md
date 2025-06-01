@@ -58,6 +58,24 @@ SegmentQTL is executed via the command line with various options to control inpu
   - P-value threshold for generating plots (`-1` disables plotting).
 - `--plot_dir`  
   - Directory for saving generated plots.
+ 
+## Output Format
+
+The primary output file of SegmentQTL is a CSV containing gene-variant associations.
+
+### Output Columns
+
+| Column Name          | Description                                                                            |
+|----------------------|----------------------------------------------------------------------------------------|
+| `gene`               | Gene identifier.                                                                       |
+| `variant`            | Variant identifier.                                                                    |
+| `number_of_samples`  | Effective number of samples used in the association test after the segment filtering.  |
+| `slope`              | Estimated regression coefficient (effect size) for the genotype–phenotype association. |
+| `slope_se`           | Standard error of the slope estimate.                                                  |
+| `nominal_p`          | P-value from the nominal association test.                                             |
+| `p_adj`              | Adjusted p-value after correction via FDR.                                             |
+| `chr`                | Chromosome where the gene and variant are located.                                     |
+
 
 ---
 
