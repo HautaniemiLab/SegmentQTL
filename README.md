@@ -117,13 +117,6 @@ The `--covariates` argument should point to a CSV file containing covariate valu
 - **Row 1**: Sample IDs only (e.g., `sample1,sample2,sample3`)
 - **Row 2+**: First cell is the covariate name, followed by values for each sample.
 
-##### **Example File Format:**
-
-|         | sample1 | sample2 | sample3 |
-|---------|---------|---------|---------|
-| batch   | 1       | 1       | 2       |
-| purity  | 0.95    | 0.88    | 0.91    |
-
 ---
 
 #### 4. Copy Number File (CSV)
