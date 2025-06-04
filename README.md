@@ -193,58 +193,66 @@ The primary output file of SegmentQTL is a CSV containing gene-variant associati
 
 ## Examples
 
-### 1. Nominal Mapping
-Run a nominal association test for chromosome 7 using 4 CPU cores:
+These examples assume you're in the root of the `SegmentQTL` folder.
+
+First, unzip the provided mock dataset:
 
 ```bash
-python __main__.py --mode nominal --chromosome 7 --num_cores 4 \
-    --genotypes path/to/genotypes --quantifications path/to/quantifications.csv \
-    --covariates path/to/covariates.csv --copynumber path/to/copynumber.csv \
-    --segmentation path/to/segmentation.csv --out_dir results/
+unzip mock.zip
+```
+
+### 1. Nominal Mapping
+Run a nominal association test for chromosome 8 using 4 CPU cores:
+
+```bash
+python -m segmentqtl --mode nominal --chromosome 8 --num_cores 4 \
+    --genotypes mock/genotypes --quantifications mock/quantifications.csv \
+    --covariates mock/covariates.csv --copynumber mock/copynumbers.csv \
+    --segmentation mock/segments.csv --out_dir results/
 ```
 
 ### 2. Permutation-Based Mapping
-Perform 5,000 permutations using the beta approximation method on chromosome X with 8 CPU cores:
+Perform 25 permutations using the beta approximation method:
 
 ```bash
-python __main__.py --mode perm --chromosome X --num_permutations 5000 \
-    --perm_method beta --num_cores 8 \
-    --genotypes path/to/genotypes --quantifications path/to/quantifications.csv \
-    --covariates path/to/covariates.csv --copynumber path/to/copynumber.csv \
-    --segmentation path/to/segmentation.csv --out_dir results/
+python -m segmentqtl --mode perm --chromosome 8 --num_permutations 25 \
+    --perm_method beta --num_cores 4 \
+    --genotypes mock/genotypes --quantifications mock/quantifications.csv \
+    --covariates mock/covariates.csv --copynumber mock/copynumbers.csv \
+    --segmentation mock/segments.csv --out_dir results/
 ```
+Note that number of permutations should not exceed the number of phenotypes in the full dataset.
 
 ### 3. FDR Correction
 
 Apply false discovery rate (FDR) correction to previously computed results:
 
 ```bash
-python __main__.py --mode fdr --out_dir path/to/computedRes --fdr_out corrected_results.csv
+python -m segmentqtl --mode fdr --out_dir results/ --fdr_out corrected_results.csv
 ```
 
 ### 4. Testing All Variants for a Specific Phenotype
 
-Run SegmentQTL for all variants of a given phenotype id (e.g., gene TP53):
+Run SegmentQTL for all variants of a given phenotype id:
 
 ```bash
-python __main__.py --mode nominal --all_variants TP53 \
-    --chromosome 17 --num_cores 4 \
-    --genotypes path/to/genotypes --quantifications path/to/quantifications.csv \
-    --covariates path/to/covariates.csv --copynumber path/to/copynumber.csv \
-    --segmentation path/to/segmentation.csv --out_dir results/
+python -m segmentqtl --mode nominal --all_variants ENSG00000003987 \
+    --chromosome 8 --num_cores 1 \
+    --genotypes mock/genotypes --quantifications mock/quantifications.csv \
+    --covariates mock/covariates.csv --copynumber mock/copynumbers.csv \
+    --segmentation mock/segments.csv --out_dir results/
 ```
-This option work with nominal and permutation mode.
 
 ### 5. Generating Plots for Significant Associations
 
 Generate plots for all associations with p-values below 0.05:
 
 ```bash
-python __main__.py --mode nominal --plot_threshold 0.05 --plot_dir plots/ \
-    --chromosome 7 --num_cores 4 \
-    --genotypes path/to/genotypes --quantifications path/to/quantifications.csv \
-    --covariates path/to/covariates.csv --copynumber path/to/copynumber.csv \
-    --segmentation path/to/segmentation.csv --out_dir results/
+python -m segmentqtl --mode perm --plot_threshold 0.05 --plot_dir plots/ \
+    --chromosome 8 --num_cores 4 \
+    --genotypes mock/genotypes --quantifications mock/quantifications.csv \
+    --covariates mock/covariates.csv --copynumber mock/copynumbers.csv \
+    --segmentation mock/segments.csv --out_dir results/
 ```
 
 
