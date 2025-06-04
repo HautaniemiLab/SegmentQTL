@@ -243,7 +243,7 @@ python -m segmentqtl --mode nominal --all_variants ENSG00000003987 \
     --segmentation mock/segments.csv --out_dir results/
 ```
 
-### 5. Generating Plots for Significant Associations
+### 5. Generating QTL Plots
 
 Generate plots for all associations with p-values below 0.05:
 
