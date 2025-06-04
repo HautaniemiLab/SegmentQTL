@@ -4,14 +4,15 @@ from time import time
 
 import numpy as np
 import pandas as pd
-from plotting_utils import box_and_whisker
-from statistical_utils import (
+from tqdm import tqdm
+
+from .plotting_utils import box_and_whisker
+from .statistical_utils import (
     adjust_p_values,
     calculate_pvalue,
     calculate_slope_and_se,
     residualize,
 )
-from tqdm import tqdm
 
 
 class Cis:

@@ -1,8 +1,8 @@
 from argparse import ArgumentParser
 from os import makedirs, path
 
-from cis import Cis
-from fdr_correction import fdr
+from .cis import Cis
+from .fdr_correction import fdr
 
 
 def main():
@@ -16,31 +16,37 @@ def main():
     parser.add_argument(
         "--chromosome",
         type=str,
+        required=True,
         help="Chromosome number or X with or without chr prefix",
     )
     parser.add_argument(
         "--copynumber",
         type=str,
+        required=True,
         help="Path to copynumber CSV file",
     )
     parser.add_argument(
         "--quantifications",
         type=str,
+        required=True,
         help="Path to quantifications CSV file",
     )
     parser.add_argument(
         "--covariates",
         type=str,
+        required=True,
         help="Path to covariates CSV file",
     )
     parser.add_argument(
         "--segmentation",
         type=str,
+        required=True,
         help="Path to file with segmentation data",
     )
     parser.add_argument(
         "--genotypes",
         type=str,
+        required=True,
         help="Path to genotypes directory",
     )
     parser.add_argument(
@@ -77,7 +83,7 @@ def main():
     parser.add_argument(
         "--out_dir",
         type=str,
-        default="results/",
+        default="../results/",
         help="Directory where intermediate results are saved",
     )
     parser.add_argument(
@@ -95,7 +101,7 @@ def main():
     parser.add_argument(
         "--plot_dir",
         type=str,
-        default="plots/",
+        default="../plots/",
         help="Directory for plots.",
     )
 
