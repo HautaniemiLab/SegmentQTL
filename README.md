@@ -4,6 +4,8 @@
 
 SegmentQTL supports both **nominal** and **permutation-based** association testing, along with **false discovery rate (FDR) correction**. The tool efficiently processes large datasets, leveraging multi-core parallelization and supporting continuous genotype dosage data to enhance analysis precision.
 
+<img src="bySegmentFiltering.png" alt="variantFiltering" width="500"/>
+
 ## Features
 
 - **Segmentation-aware QTL mapping**: Filters out associations where variants and genes are separated by breakpoints.
