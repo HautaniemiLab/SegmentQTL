@@ -16,6 +16,30 @@ SegmentQTL supports both **nominal** and **permutation-based** association testi
 - **Customizable window size**: Users can specify the genomic window for cis-mapping.
 - **Plotting functionality**: Option to generate QTL plots for visualizing genotype-phenotype associations.
 
+## Installation
+
+You can install this tool using one of the following methods:
+
+### Option 1: Clone the repository
+
+```bash
+git clone https://github.com/HautaniemiLab/SegmentQTL.git
+cd SegmentQTL
+
+# (Optional, but recommended) Create a virtual environment
+python3 -m venv <my-venv>
+source <my-venv>/bin/activate
+
+pip install -r requirements.txt
+```
+### Option 2: Download the binary (no setup needed)
+
+Download segmentqtl binary from [Releases](https://github.com/HautaniemiLab/SegmentQTL/releases/tag/v1.0.0). Remember to make it executable:
+
+```bash
+chmod +x segmentqtl
+```
+
 ## Usage
 
 SegmentQTL is executed via the command line with various options to control input data, analysis modes, and computational resources. The key arguments are:
