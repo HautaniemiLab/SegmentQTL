@@ -1,4 +1,11 @@
-# SegmentQTL
+<table style="width: 100%; border-collapse: collapse;" border="0">
+<tr>
+  <td style="vertical-align: top; border: none;"><h1>SegmentQTL</h1></td>
+  <td style="text-align: right; border: none;">
+    <img src="SegmentQTLlogo.png" alt="SegmentQTL logo" height="110">
+  </td>
+</tr>
+</table>
 
 ## Overview
 
