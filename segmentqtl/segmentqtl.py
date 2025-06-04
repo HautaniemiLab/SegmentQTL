@@ -16,37 +16,31 @@ def main():
     parser.add_argument(
         "--chromosome",
         type=str,
-        required=True,
         help="Chromosome number or X with or without chr prefix",
     )
     parser.add_argument(
         "--copynumber",
         type=str,
-        required=True,
         help="Path to copynumber CSV file",
     )
     parser.add_argument(
         "--quantifications",
         type=str,
-        required=True,
         help="Path to quantifications CSV file",
     )
     parser.add_argument(
         "--covariates",
         type=str,
-        required=True,
         help="Path to covariates CSV file",
     )
     parser.add_argument(
         "--segmentation",
         type=str,
-        required=True,
         help="Path to file with segmentation data",
     )
     parser.add_argument(
         "--genotypes",
         type=str,
-        required=True,
         help="Path to genotypes directory",
     )
     parser.add_argument(
