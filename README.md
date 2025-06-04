@@ -248,8 +248,8 @@ python -m segmentqtl --mode nominal --all_variants ENSG00000003987 \
 Generate plots for all associations with p-values below 0.05:
 
 ```bash
-python -m segmentqtl --mode perm --plot_threshold 0.05 --plot_dir plots/ \
-    --chromosome 8 --num_cores 4 \
+python -m segmentqtl --mode perm --plot_threshold 0.005 --plot_dir plots/ \
+    --chromosome 8 --num_cores 4 --num_permutations 25 \
     --genotypes mock/genotypes --quantifications mock/quantifications.csv \
     --covariates mock/covariates.csv --copynumber mock/copynumbers.csv \
     --segmentation mock/segments.csv --out_dir results/
