@@ -28,7 +28,7 @@ git clone https://github.com/HautaniemiLab/SegmentQTL.git
 cd SegmentQTL
 
 # (Optional, but recommended) Create a virtual environment
-python3 -m venv <my-venv>
+python -m venv <my-venv>
 source <my-venv>/bin/activate
 
 pip install -r requirements.txt
