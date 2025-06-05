@@ -21,6 +21,8 @@ SegmentQTL supports both **nominal** and **permutation-based** association testi
 
 ## Installation
 
+Requiring preinstalled Python and pip (Python package installer).
+
 ```bash
 git clone https://github.com/HautaniemiLab/SegmentQTL.git
 cd SegmentQTL
