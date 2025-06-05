@@ -6,15 +6,18 @@ SegmentQTL supports both **nominal** and **permutation-based** association testi
 
 <img src="images/bySegmentFiltering.png" alt="variantFiltering" width="500"/>
 
-## Features
+## Contents
 
-- **Segmentation-aware QTL mapping**: Filters out associations where variants and genes are separated by breakpoints.
-- **Multiple modes**: Nominal p-value testing, permutation-based testing, and FDR correction.
-- **Parallelization support**: Users can specify the number of CPU cores to accelerate computations.
-- **Permutation testing options**: Supports beta approximation and direct permutation methods.
-- **Structured input format**: Accepts genotype, segmentation, covariate, copy number, and quantification data in CSV format.
-- **Customizable window size**: Users can specify the genomic window for cis-mapping.
-- **Plotting functionality**: Option to generate QTL plots for visualizing genotype-phenotype associations.
+- [Installation](#installation)
+- [Usage](#usage)
+- [Input File Formats](#input-file-formats)
+  - [1. Genotype Files (Per-Chromosome CSVs)](#1-genotype-files-per-chromosome-csvs)
+  - [2. Phenotype Quantifications (CSV)](#2-phenotype-quantifications-csv)
+  - [3. Covariate File (CSV)](#3-covariate-file-csv)
+  - [4. Copy Number File (CSV)](#4-copy-number-file-csv)
+  - [5. Segmentation File (CSV)](#5-segmentation-file-csv)
+- [Output Format](#output-format)
+- [Examples](#examples)
 
 ## Installation
 
@@ -245,10 +248,10 @@ python -m segmentqtl --mode nominal --all_variants ENSG00000003987 \
 
 ### 5. Generating QTL Plots
 
-Generate plots for all associations with p-values below 0.05:
+Generate QTL plots for all tested phenotypes:
 
 ```bash
-python -m segmentqtl --mode perm --plot_threshold 0.005 --plot_dir plots/ \
+python -m segmentqtl --mode perm --plot_threshold 1 --plot_dir plots/ \
     --chromosome 8 --num_cores 4 --num_permutations 25 \
     --genotypes mock/genotypes --quantifications mock/quantifications.csv \
     --covariates mock/covariates.csv --copynumber mock/copynumbers.csv \
