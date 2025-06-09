@@ -89,6 +89,8 @@ The `--genotypes` argument should point to a directory containing per-chromosome
 
 Each file corresponds to one chromosome and contains genotype dosages for multiple samples.
 
+See ![AlleleDoser](https://github.com/HautaniemiLab/AlleleDoser) to compute genotype dosages.
+
 ##### **Required Columns:**
 - **`ID`**: Variant identifier in the format `chr:pos:ref:alt` (e.g., `chr8:123456:A:G`).
 - **`<sample1>`**, **`<sample2>`**, ...: Sample-specific dosage values. Dosages are continuous values between `0` and `1`.
