@@ -1,6 +1,6 @@
 # <img src="images/segmentQTLcircle.png" alt="segmentLogo" align="right" height="138" style="margin-left: 0.5em" /> SegmentQTL
 
-[![Preprint](https://img.shields.io/badge/bioRxiv-Preprint-orange)]([https://doi.org/xxxxx](https://doi.org/10.1101/2025.07.28.667150 )
+[![Preprint](https://img.shields.io/badge/bioRxiv-Preprint-orange)]([https://doi.org/10.1101/2025.07.28.667150](https://doi.org/10.1101/2025.07.28.667150 )
 
 **SegmentQTL** is a segmentation-aware molecular quantitative trait loci (molQTL) analysis tool designed for copy-number–driven cancers. It incorporates genomic segmentation data to improve QTL mapping accuracy by filtering out associations disrupted by structural variations. This approach prevents spurious signals caused by breakpoints, ensuring biologically meaningful genotype-phenotype associations.
 
