@@ -1,264 +1,287 @@
 import numpy as np
-import pandas as pd
-from scipy.optimize import minimize, newton
-from scipy.special import loggamma
 from scipy.stats import beta, f
-from sklearn.linear_model import LinearRegression
 
 
-def residualize(regression_data: pd.DataFrame):
+def fit_ols_null(y: np.ndarray, X: np.ndarray) -> tuple:
     """
-    Residualize the GEX and cur_genotypes columns by removing the variance explained by covariates.
+    Fit OLS null model and return fitted values and residuals.
+    Uses fast normal equations solver (matching fit_ols_and_test() path).
 
     Parameters:
-    - regression_data: The input dataframe with GEX, cur_genotypes, and covariates.
+    - y: Outcome vector (n,)
+    - X: Design matrix (n, p), typically includes intercept and covariates
 
     Returns:
-    - Residualized GEX and genotypes.
+    - (y_hat, residuals): Tuple of fitted values and residuals, both 1D arrays
     """
-    gex = regression_data["GEX"].to_numpy().reshape(-1, 1)
-    cur_genotypes = regression_data["cur_genotypes"].to_numpy().reshape(-1, 1)
-    covariates = regression_data.drop(columns=["GEX", "cur_genotypes"]).to_numpy()
+    y = np.asarray(y, dtype=float).reshape(-1, 1)
+    X = np.asarray(X, dtype=float)
 
-    model = LinearRegression()
+    n = y.shape[0]
+    p = X.shape[1]
 
-    model.fit(covariates, gex)
-    gex_residuals = gex - model.predict(covariates)
+    if n <= p:
+        # Not enough samples; return NaNs
+        return np.full(n, np.nan), np.full(n, np.nan)
 
-    model.fit(covariates, cur_genotypes)
-    cur_genotypes_residuals = cur_genotypes - model.predict(covariates)
+    # Fast OLS via normal equations
+    XtX = X.T @ X
+    Xty = X.T @ y
 
-    return gex_residuals.flatten(), cur_genotypes_residuals.flatten()
-
-
-def get_tstat2(corr: float, df: int):
-    """Calculate t-statistic squared from correlation and degrees of freedom.
-
-    Parameters:
-    - corr: Pearson correlation
-    - df: Degrees of freedom
-
-    Returns:
-    - t-statistic squared
-    """
-    return df * corr**2 / (1 - corr**2)
-
-
-def get_pvalue_from_tstat2(tstat2: float, df: int):
-    """Calculate the p-value from the t-statistic and degrees of freedom.
-
-    Parameters:
-    - tstat2: t-statistic squared
-    - df: Degrees of freedom
-
-    Returns:
-    - p-value
-    """
-    # Use the F-distribution survival function (sf) for the upper tail probability
-    return f.sf(tstat2, 1, df)
-
-
-def get_pvalue_from_corr(r2: float, df: int):
-    """Calculate p-value from correlation r2 and degrees of freedom.
-
-    Parameters:
-    - r2: R² value
-    - dof: Degrees of freedom
-
-    Returns:
-    - p-value
-    """
-    tstat2 = get_tstat2(np.sqrt(r2), df)
-    return f.sf(tstat2, 1, df)
-
-
-def beta_shape1_from_dof(r2_values: np.ndarray, dof: float):
-    """Estimate Beta shape1 parameter from moment matching.
-
-    Parameters:
-    - r2_perm: Array of permutation R² values
-    - dof: Optimized degrees of freedom
-
-    """
-    pvals = np.array([get_pvalue_from_corr(r2, dof) for r2 in r2_values])
-    mean_p = np.mean(pvals)
-    var_p = np.var(pvals)
-    return mean_p * (mean_p * (1 - mean_p) / var_p - 1.0)
-
-
-def beta_log_likelihood(pvals: np.ndarray, shape1: float, shape2: float):
-    """Negative log-likelihood for the Beta distribution.
-
-    Parameters:
-    - pvals : Array of permutation p-values
-    - shape1 : Beta shape parameter 1
-    - shape2 : Beta shape parameter 2
-
-    Returns
-    - The negative log-likelihood of the observed p-values given the
-        specified Beta distribution parameters
-    """
-    log_beta = loggamma(shape1) + loggamma(shape2) - loggamma(shape1 + shape2)
-    return (
-        (1.0 - shape1) * np.sum(np.log(pvals))
-        + (1.0 - shape2) * np.sum(np.log(1.0 - pvals))
-        + len(pvals) * log_beta
-    )
-
-
-def optimize_dof(r2_perm: np.ndarray, dof_init: int, tol=1e-4):
-    """
-    Optimize degrees of freedom such that Beta shape1 ≈ 1.
-
-    Parameters:
-    - r2_perm: Array of permutation R² values
-    - dof_init: Initial value of degrees of freedom
-    - tol: Tolerance level
-
-    Returns
-    - Optimized degrees of freedom
-    """
-
-    def target(log_dof):
-        return np.log(beta_shape1_from_dof(r2_perm, np.exp(log_dof)))
-
-    log_dof_init = np.log(dof_init)
     try:
-        log_true_dof = newton(target, log_dof_init, tol=tol, maxiter=50)
-        return np.exp(log_true_dof)
-    except RuntimeError:
-        print("Warning: Newton's method failed, using fallback minimization.")
-        res = minimize(
-            lambda x: np.abs(beta_shape1_from_dof(r2_perm, x) - 1.0),
-            dof_init,
-            method="Nelder-Mead",
-            tol=tol,
-        )
-        return res.x[0]
+        # Try Cholesky for speed
+        L = np.linalg.cholesky(XtX)
+        z = np.linalg.solve(L, Xty)
+        beta = np.linalg.solve(L.T, z)
+    except np.linalg.LinAlgError:
+        try:
+            # Fallback to solve
+            beta = np.linalg.solve(XtX, Xty)
+        except np.linalg.LinAlgError:
+            # Last resort: lstsq
+            beta, *_ = np.linalg.lstsq(X, y, rcond=None)
+
+    y_hat = (X @ beta).flatten()
+    residuals = (y - X @ beta).flatten()
+
+    return y_hat, residuals
 
 
-def fit_beta_parameters(r2_perm: np.ndarray, dof: float):
+def calculate_aic_full_ols(y: np.ndarray, X: np.ndarray) -> float:
     """
-    Fit Beta distribution parameters to permutation p-values.
+    AIC for Gaussian OLS with MLE sigma^2 = RSS/n.
+
+    Matches statsmodels OLS aic (up to floating rounding):
+      AIC = n*(log(2*pi) + 1 + log(RSS/n)) + 2*k
+    where k is number of regression parameters (including intercept).
+    """
+    y = np.asarray(y, dtype=float).reshape(-1, 1)
+    X = np.asarray(X, dtype=float)
+
+    n = y.shape[0]
+    if n == 0:
+        return np.nan
+
+    if X.ndim == 1:
+        X = X.reshape(-1, 1)
+
+    # Add intercept
+    Xd = np.column_stack([np.ones((n, 1)), X])
+    k = Xd.shape[1]  # includes intercept
+
+    if n <= k:
+        return np.nan
+
+    beta, *_ = np.linalg.lstsq(Xd, y, rcond=None)
+    resid = y - Xd @ beta
+    rss = float(np.sum(resid**2))
+
+    if rss <= 0:
+        return np.nan
+
+    return float(n * (np.log(2.0 * np.pi) + 1.0 + np.log(rss / n)) + 2.0 * k)
+
+
+def fit_ols_and_test(y: np.ndarray, X_null: np.ndarray, X_alt: np.ndarray):
+    """
+    Fit OLS models and perform partial F-test.
+
+    NOTE: This function is called in the inner loop of cis-scans. Using
+    np.linalg.lstsq (SVD) per variant is expensive, so we solve the normal
+    equations (X'X) beta = X'y with np.linalg.solve / Cholesky where possible,
+    and fall back to lstsq only if the Gram matrix is singular/ill-conditioned.
 
     Parameters:
-    - r2_perm: Array of permutation R² values
-    - dof: Optimized degrees of freedom
+    - y: Outcome vector (n,)
+    - X_null: Null model design matrix (n, p_null) - includes intercept
+    - X_alt: Alt model design matrix (n, p_alt) - includes intercept and extra predictors
 
     Returns:
-    - Beta shape parameters 1 and 2
+    - Dictionary with:
+        - beta_alt: Full set of OLS coefficients for alt model
+        - se_alt: Standard errors for alt model coefficients
+        - rss_null: Residual sum of squares for null model
+        - rss_alt: Residual sum of squares for alt model
+        - f_stat: F-statistic for partial F-test
+        - p_value: p-value from partial F-test
+        - r2_alt: R² from alt model
     """
-    pvals = np.array([get_pvalue_from_corr(r2, dof) for r2 in r2_perm])
-    mean_p, var_p = np.mean(pvals), np.var(pvals)
+    y = np.asarray(y, dtype=float).reshape(-1, 1)
+    X_null = np.asarray(X_null, dtype=float)
+    X_alt = np.asarray(X_alt, dtype=float)
 
-    # Initial Beta parameter estimates
-    beta_shape1 = mean_p * (mean_p * (1 - mean_p) / var_p - 1)
-    beta_shape2 = beta_shape1 * (1 / mean_p - 1)
+    n = y.shape[0]
+    p_null = X_null.shape[1]
+    p_alt = X_alt.shape[1]
 
-    # Refine using log-likelihood minimization
-    res = minimize(
-        lambda s: beta_log_likelihood(pvals, s[0], s[1]),
-        [beta_shape1, beta_shape2],
-        method="Nelder-Mead",
-    )
-    beta_shape1, beta_shape2 = res.x
-    return beta_shape1, beta_shape2
+    if n <= p_alt:
+        return {
+            "beta_alt": np.full(p_alt, np.nan),
+            "se_alt": np.full(p_alt, np.nan),
+            "rss_null": np.nan,
+            "rss_alt": np.nan,
+            "f_stat": np.nan,
+            "p_value": np.nan,
+            "r2_alt": np.nan,
+        }
 
+    def _ols_fast(X: np.ndarray, y_: np.ndarray):
+        """Return (beta, rss, inv_xtx) with fast path via normal equations."""
+        # Try normal equations (small p) first: solve (X'X)beta = X'y
+        XtX = X.T @ X
+        Xty = X.T @ y_
+        try:
+            # Prefer Cholesky for speed/stability if positive definite
+            L = np.linalg.cholesky(XtX)
+            # Solve L * z = X'y, then L.T * beta = z
+            z = np.linalg.solve(L, Xty)
+            beta = np.linalg.solve(L.T, z)
+            # Inverse via Cholesky factors: inv(XtX) = inv(L.T) @ inv(L)
+            Linv = np.linalg.solve(L, np.eye(L.shape[0]))
+            inv_xtx = Linv.T @ Linv
+        except np.linalg.LinAlgError:
+            try:
+                beta = np.linalg.solve(XtX, Xty)
+                inv_xtx = np.linalg.inv(XtX)
+            except np.linalg.LinAlgError:
+                beta, *_ = np.linalg.lstsq(X, y_, rcond=None)
+                inv_xtx = None
 
-def adjust_p_values(r2_perm: np.ndarray, r2_nominal: float, dof_init=10, tol=1e-4):
-    """
-    Calculate Beta-approximated p-values from permutation results.
+        resid = y_ - X @ beta
+        rss = float(np.sum(resid**2))
+        return beta, rss, inv_xtx
 
-    Parameters:
-    - r2_perm: Array of permutation R² values
-    - r2_nominal: The nominal R² value
-    - dof_init: Initial value of degrees of freedom
-    - tol: Tolerance level
+    # Fit null and alt
+    beta_null, rss_null, _ = _ols_fast(X_null, y)
+    beta_alt, rss_alt, inv_xtx_alt = _ols_fast(X_alt, y)
 
-    Returns:
-    - The permutation adjusted p-value
+    # Standard errors for alt model
+    sigma2_hat = rss_alt / (n - p_alt)
+    if inv_xtx_alt is None:
+        # fallback: try direct inverse; if still fails, return NaNs
+        try:
+            inv_xtx_alt = np.linalg.inv(X_alt.T @ X_alt)
+        except np.linalg.LinAlgError:
+            inv_xtx_alt = None
 
-    """
-    optimized_dof = optimize_dof(r2_perm, dof_init, tol)
-
-    beta_shape1, beta_shape2 = fit_beta_parameters(r2_perm, optimized_dof)
-
-    # Calculate p-value for nominal r2
-    pval_nominal = get_pvalue_from_corr(r2_nominal, optimized_dof)
-    adjusted_pval = beta.cdf(pval_nominal, beta_shape1, beta_shape2)
-
-    return adjusted_pval
-
-
-def get_slope(corr: float, phenotype_sd: np.ndarray, genotype_sd: np.ndarray):
-    """Calculate the slope.
-
-    Parameters:
-    - corr: Pearson correlation
-    - phenotype_sd: Standard deviation of phenotypes
-    - genotype_sd: Standard deviation of genotypes
-
-    Returns:
-    - slope
-    """
-    if genotype_sd < 1e-16 or phenotype_sd < 1e-16:
-        return 0
+    if inv_xtx_alt is None:
+        se_alt = np.full(p_alt, np.nan)
     else:
-        return corr * phenotype_sd / genotype_sd
+        se_alt = np.sqrt(
+            np.clip(np.diag(inv_xtx_alt) * sigma2_hat, a_min=0.0, a_max=None)
+        )
+
+    # Partial F-test
+    df1 = p_alt - p_null
+    df2 = n - p_alt
+
+    # Guard for numerical issues (can happen when rss_alt ~ 0)
+    if (
+        df1 <= 0
+        or df2 <= 0
+        or not np.isfinite(rss_null)
+        or not np.isfinite(rss_alt)
+        or rss_alt <= 0
+    ):
+        f_stat = np.nan
+        p_value = np.nan
+    else:
+        f_stat = ((rss_null - rss_alt) / df1) / (rss_alt / df2)
+        p_value = float(f.sf(f_stat, df1, df2)) if np.isfinite(f_stat) else np.nan
+
+    # R² for alt model
+    y_mean = float(np.mean(y))
+    tss = float(np.sum((y - y_mean) ** 2))
+    r2_alt = 1.0 - (rss_alt / tss) if tss > 0 else 0.0
+
+    return {
+        "beta_alt": beta_alt.flatten(),
+        "se_alt": se_alt,
+        "rss_null": rss_null,
+        "rss_alt": rss_alt,
+        "f_stat": f_stat,
+        "p_value": p_value,
+        "r2_alt": r2_alt,
+    }
 
 
-def calculate_slope_and_se(regression_data: pd.DataFrame, corr: float):
+def fit_multivariate_ols(y: np.ndarray, X: np.ndarray):
     """
-    Calculate the slope and its standard error.
+    Fit multivariate OLS model.
 
     Parameters:
-    regression_data: A dataframe with residualized "GEX" and "cur_genotypes" columns.
-    corr: The correlation between residualized "GEX" and "cur_genotypes".
+    - y: Outcome vector (n,)
+    - X: Design matrix (n, p) - should include intercept
 
     Returns:
-    slope: The slope of the linear relationship.
-    slope_se: The standard error of the slope.
+    - Dictionary with:
+        - beta: OLS coefficients
+        - se: Standard errors
+        - r2: R² value
+        - rss: Residual sum of squares
     """
-    sample_count = len(regression_data)
-    covariate_count = regression_data.shape[1] - 2
+    y = np.asarray(y, dtype=float).reshape(-1, 1)
+    X = np.asarray(X, dtype=float)
 
-    df = sample_count - 2 - covariate_count
+    n = y.shape[0]
+    p = X.shape[1]
 
-    tstat2 = get_tstat2(corr, df)
+    if n <= p:
+        return {
+            "beta": np.full(p, np.nan),
+            "se": np.full(p, np.nan),
+            "r2": np.nan,
+            "rss": np.nan,
+        }
 
-    gex_residuals = regression_data["GEX"].to_numpy()
-    cur_genotypes_residuals = regression_data["cur_genotypes"].to_numpy()
+    beta, *_ = np.linalg.lstsq(X, y, rcond=None)
+    resid = y - X @ beta
+    rss = float(np.sum(resid**2))
 
-    # Calculate standard deviations of phenotype (GEX) and genotype (cur_genotypes)
-    # using Bessel's correction (ddof=1)
-    phenotype_sd = np.std(gex_residuals, ddof=1)
-    genotype_sd = np.std(cur_genotypes_residuals, ddof=1)
+    sigma2_hat = rss / (n - p)
 
-    slope = get_slope(corr, phenotype_sd, genotype_sd)
+    try:
+        var_covar_matrix = np.linalg.inv(X.T @ X) * sigma2_hat
+        se = np.sqrt(np.diag(var_covar_matrix))
+    except np.linalg.LinAlgError:
+        se = np.full(p, np.nan)
 
-    slope_se = abs(slope) / np.sqrt(tstat2) if tstat2 > 0 else np.inf
+    y_mean = np.mean(y)
+    tss = np.sum((y - y_mean) ** 2)
+    r2 = 1.0 - (rss / tss) if tss > 0 else 0.0
 
-    return slope, slope_se
+    return {
+        "beta": beta.flatten(),
+        "se": se,
+        "r2": r2,
+        "rss": rss,
+    }
 
 
-def calculate_pvalue(df: pd.DataFrame, corr: float):
+def fit_beta_mle(pvals: np.ndarray) -> tuple:
     """
-    Calculate the p-value using the residualized data and correlation.
+    Fit Beta distribution parameters to observed p-values using MLE.
 
     Parameters:
-    df: A dataframe with residualized "GEX" and "cur_genotypes" columns.
-    corr: The correlation between residualized "GEX" and "cur_genotypes".
+    - pvals: Array of p-values from permutation null distribution
 
     Returns:
-    pval: The p-value for testing whether the slope is different from 0.
+    - (alpha, beta): Beta distribution shape parameters
     """
-    sample_count = len(df)
-    covariate_count = df.shape[1] - 2
+    pvals = np.asarray(pvals, dtype=float)
+    pvals = pvals[~np.isnan(pvals)]
 
-    df = sample_count - 2 - covariate_count
+    if len(pvals) == 0:
+        return 1.0, 1.0
 
-    tstat2 = get_tstat2(corr, df)
+    # Clip p-values away from 0 and 1 to avoid log(0) in Beta MLE
+    pvals = np.clip(pvals, 1e-15, 1 - 1e-15)
 
-    pval = get_pvalue_from_tstat2(tstat2, df)
-
-    return pval
+    try:
+        # Use scipy.stats.beta.fit for fast and stable MLE
+        # floc=0, fscale=1 fixes the support to [0, 1]
+        alpha, beta_shape, _, _ = beta.fit(pvals, floc=0, fscale=1)
+        return alpha, beta_shape
+    except Exception:
+        # Fallback if fit fails (e.g., all values identical after clipping)
+        return 1.0, 1.0

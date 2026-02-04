@@ -24,7 +24,7 @@ def combine_chromosome(outdir: str):
         dfs.append(df)
 
     combined_df = pd.concat(dfs, ignore_index=True)
-    combined_df = combined_df.dropna()
+    combined_df = combined_df.dropna(subset=["p_adj"])
 
     return combined_df
 

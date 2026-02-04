@@ -1,8 +1,8 @@
 from argparse import ArgumentParser
 from os import makedirs, path
 
-from .cis import Cis
-from .fdr_correction import fdr
+from cis import Cis
+from fdr_correction import fdr
 
 
 def main():
@@ -19,9 +19,10 @@ def main():
         help="Chromosome number or X with or without chr prefix",
     )
     parser.add_argument(
-        "--copynumber",
+        "--phenotype_covariate",
         type=str,
-        help="Path to copynumber CSV file",
+        default=None,
+        help="Path to phenotype-level covariate CSV file. Optional.",
     )
     parser.add_argument(
         "--quantifications",
@@ -59,13 +60,13 @@ def main():
     parser.add_argument(
         "--num_permutations",
         type=int,
-        default=8000,
+        default=5000,
         help="Number of permutations to be run on each phenotype",
     )
     parser.add_argument(
         "--window",
         type=int,
-        default=1000000,
+        default=500000,
         help="Window size",
     )
     parser.add_argument(
@@ -77,26 +78,18 @@ def main():
     parser.add_argument(
         "--out_dir",
         type=str,
-        default="../results/",
         help="Directory where intermediate results are saved",
     )
     parser.add_argument(
         "--fdr_out",
         type=str,
-        default="../fdr_corrected_res.csv",
         help="File path to which fdr corrected full results are saved to. Must be a csv file.",
     )
+
     parser.add_argument(
-        "--plot_threshold",
-        type=float,
-        default=-1,
-        help="Threshold p-value for creating a plot.",
-    )
-    parser.add_argument(
-        "--plot_dir",
-        type=str,
-        default="../plots/",
-        help="Directory for plots.",
+        "--record_aic",
+        action="store_true",
+        help="Record AIC scores for associations.",
     )
 
     args = parser.parse_args()
@@ -105,44 +98,49 @@ def main():
     if not out_dir.endswith("/"):
         out_dir = out_dir + "/"
 
-    plot_dir = args.plot_dir
-    if not plot_dir.endswith("/"):
-        plot_dir = plot_dir + "/"
-
     mode = args.mode
     if mode == "nominal" or mode == "perm":
         chromosome = args.chromosome
         if not chromosome.startswith("chr"):
             chromosome = "chr" + chromosome
 
-        copynumber_file = args.copynumber
+        phenotype_covariate_file = args.phenotype_covariate
         quantifications_file = args.quantifications
         covariates_file = args.covariates
         segmentation_file = args.segmentation
-        genotypes_file = f"{args.genotypes}/{chromosome}.csv"
+        genotype_alt_file = f"{args.genotypes}/{chromosome}_ALTlr.csv"
+        genotype_ref_file = f"{args.genotypes}/{chromosome}_REFlr.csv"
         all_variants_mode = args.all_variants
         perm_method = args.perm_method
         num_permutations = args.num_permutations
         window = args.window
         num_cores = args.num_cores
-        plot_threshold = args.plot_threshold
+        record_aic = args.record_aic
+
+        # Validate: permutation mode with all_variants is not supported
+        if mode == "perm" and all_variants_mode:
+            raise ValueError(
+                "--mode perm is not compatible with --all_variants. "
+                "Permutation testing computes gene-level scan p-values (best variant in window). "
+                "Use --mode nominal for per-variant association testing without permutation adjustment."
+            )
 
         # Perform cis-mapping, nominal or with permutations
         mapping = Cis(
             chromosome,
             mode,
-            copynumber_file,
+            phenotype_covariate_file,
             quantifications_file,
             covariates_file,
             segmentation_file,
-            genotypes_file,
+            genotype_alt_file,
+            genotype_ref_file,
             all_variants_mode,
             perm_method,
             num_permutations,
             window,
             num_cores,
-            plot_threshold,
-            plot_dir,
+            record_aic,
         ).calculate_associations()
 
         mapping["chr"] = chromosome
