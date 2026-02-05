@@ -25,6 +25,14 @@ def main():
         help="Path to phenotype-level covariate CSV file. Optional.",
     )
     parser.add_argument(
+        "--perm_covariate",
+        type=str,
+        default=None,
+        help="Path to phenotype-level covariate (e.g., gene-level CN) used ONLY for "
+        "Freedman-Lane residualization in permutation mode. Not included in nominal model. "
+        "If provided, removes CN-driven structure before permuting for proper exchangeability.",
+    )
+    parser.add_argument(
         "--quantifications",
         type=str,
         help="Path to quantifications CSV file",
@@ -105,6 +113,7 @@ def main():
             chromosome = "chr" + chromosome
 
         phenotype_covariate_file = args.phenotype_covariate
+        perm_covariate_file = args.perm_covariate
         quantifications_file = args.quantifications
         covariates_file = args.covariates
         segmentation_file = args.segmentation
@@ -125,11 +134,16 @@ def main():
                 "Use --mode nominal for per-variant association testing without permutation adjustment."
             )
 
+        # Validate: permutation mode requires perm_covariate for proper FL residualization
+        if mode == "perm" and perm_covariate_file is None:
+            raise ValueError("--mode perm requires --perm_covariate to be specified.")
+
         # Perform cis-mapping, nominal or with permutations
         mapping = Cis(
             chromosome,
             mode,
             phenotype_covariate_file,
+            perm_covariate_file,
             quantifications_file,
             covariates_file,
             segmentation_file,

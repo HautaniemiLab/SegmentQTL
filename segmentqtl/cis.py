@@ -1,40 +1,21 @@
-from dataclasses import dataclass
 from multiprocessing import Pool
 from os import path
 from time import time
 
 import numpy as np
 import pandas as pd
-from scipy.stats import beta, f
 from tqdm import tqdm
 
 from statistical_utils import (
-    calculate_aic_full_ols,
-    fit_beta_mle,
+    check_d_variance,
     fit_ols_and_test,
-    fit_ols_null,
 )
-
-
-@dataclass
-class VariantFWLCache:
-    """Cache for fast permutation testing using Frisch-Waugh-Lovell residualization.
-
-    Optimized to:
-    - Store idx_masky (indices into mask_y axis) instead of full sample indices
-    - Store QcT (transposed) to avoid transpose per permutation
-    - Store QgT instead of G_tilde to avoid matrix-vector multiply with G_tilde
-    - Use projection-based RSS computation: rss1 = ||y_tilde - Qg @ (QgT @ y_tilde)||^2
-    """
-
-    idx_masky: (
-        np.ndarray
-    )  # indices into mask_y axis (not full sample axis); shape (n_i,)
-    QcT: np.ndarray  # transposed reduced Q for covariates; shape (rank_c, n_i)
-    Qg: np.ndarray  # reduced Q for residualized predictors; shape (n_i, p)
-    QgT: np.ndarray  # transposed Qg; shape (p, n_i)
-    df1: int  # numerator df (number of predictors)
-    df2: int  # denominator df
+from statistical_utils import (
+    gene_variant_regressions as run_gene_variant_regressions,
+)
+from statistical_utils import (
+    gene_variant_regressions_permutations as run_gene_variant_regressions_permutations,
+)
 
 
 class Cis:
@@ -43,6 +24,7 @@ class Cis:
         chromosome,
         mode,
         phenotype_covariate,
+        perm_covariate,
         quantifications,
         covariates,
         segmentation,
@@ -64,6 +46,14 @@ class Cis:
             )
         else:
             self.phenotype_covariate_df = None
+
+        # Load permutation-only covariate (optional, for FL residualization)
+        if perm_covariate is not None:
+            self.perm_covariate_df = self.load_and_validate_file(
+                perm_covariate, index_col=0
+            )
+        else:
+            self.perm_covariate_df = None
 
         self.full_quan = self.load_and_validate_file(quantifications, index_col=3)
         self.quan = self.full_quan[self.full_quan["chr"] == self.chromosome]
@@ -223,7 +213,6 @@ class Cis:
         alt_arr = variants_alt.to_numpy(dtype=float, copy=True)
         ref_arr = variants_ref.to_numpy(dtype=float, copy=True)
         sample_cols = variants_alt.columns.to_numpy()
-        n_variants, n_samples = alt_arr.shape
 
         seg_index = self.segmentation.index.to_numpy()
         seg_startpos = self.segmentation["startpos"].to_numpy()
@@ -269,143 +258,6 @@ class Cis:
 
         return variants_alt, variants_ref
 
-    def build_variant_fwl_caches(
-        self,
-        transf_variants_alt: pd.DataFrame,
-        transf_variants_ref: pd.DataFrame,
-        mask_y: np.ndarray,
-        masky_pos: np.ndarray,
-        phenotype_cov_full: np.ndarray,
-        cov_values_full: list,
-    ):
-        """
-        Pre-compute Frisch-Waugh-Lovell (FWL) caches for all variants in the window.
-
-        Optimized to:
-        - Build masks directly without calling filter_arrays() (avoids duplication)
-        - Store idx_masky (indices into mask_y axis) instead of full sample indices
-        - Store QcT (transposed) to avoid transpose per permutation
-        - Store QgT instead of G_tilde for projection-based RSS computation
-        - Convert DataFrames to NumPy once and iterate by row index (not label)
-        - Use matrix_rank for df2 to handle rank-deficient covariates
-
-        Parameters:
-        - transf_variants_alt: DataFrame of transformed ALTlr variants
-        - transf_variants_ref: DataFrame of transformed REFlr variants
-        - mask_y: Boolean mask for samples passing phenotype+covariate filters
-        - masky_pos: Mapping from full sample index -> mask_y position (-1 if not in mask_y)
-        - phenotype_cov_full: Optional phenotype-level covariate
-        - cov_values_full: List of sample-level covariates
-
-        Returns:
-        - Dictionary mapping variant_id -> VariantFWLCache
-        """
-        caches = {}
-
-        # Pre-slice covariates to mask_y for efficiency
-        phenotype_cov_masky = (
-            phenotype_cov_full[mask_y] if phenotype_cov_full is not None else None
-        )
-        cov_values_masky = [cov_val[mask_y] for cov_val in cov_values_full]
-
-        alt_mat = transf_variants_alt.to_numpy(dtype=float)
-        ref_mat = transf_variants_ref.to_numpy(dtype=float)
-        variant_ids = transf_variants_alt.index.to_numpy()
-
-        for row_idx, variant_index in enumerate(variant_ids):
-            altlr_full = alt_mat[row_idx]
-            reflr_full = ref_mat[row_idx]
-
-            # Build mask_full directly: start from mask_y and AND genotype masks
-            mask_full = mask_y & ~np.isnan(altlr_full) & ~np.isnan(reflr_full)
-
-            # Get indices in full sample axis
-            idx_full = np.flatnonzero(mask_full)
-            n_i = len(idx_full)
-
-            # Check minimum sample size
-            if n_i < 30:
-                continue
-
-            # Slice genotypes to filtered set
-            altlr_f = altlr_full[idx_full]
-            reflr_f = reflr_full[idx_full]
-
-            # Check genotype variance
-            if not self.check_grouping(altlr_f, reflr_f):
-                continue
-
-            # Convert idx_full to idx_masky (indices into mask_y axis)
-            idx_masky = masky_pos[idx_full]
-            # Sanity check: all indices should be valid (no -1 values)
-            # since mask_full is a subset of mask_y
-            assert np.all(idx_masky >= 0), "idx_masky contains invalid indices"
-
-            # Build covariate matrix C (on filtered set, sliced from mask_y arrays)
-            cov_blocks = []
-            if phenotype_cov_masky is not None:
-                cov_blocks.append(
-                    np.asarray(phenotype_cov_masky[idx_masky], dtype=float)
-                )
-            for cov_val_masky in cov_values_masky:
-                cov_blocks.append(np.asarray(cov_val_masky[idx_masky], dtype=float))
-
-            C = (
-                np.column_stack([np.ones(n_i)] + cov_blocks)
-                if len(cov_blocks) > 0
-                else np.ones((n_i, 1))
-            )
-
-            # Compute QR of C for FWL
-            try:
-                Qc, Rc = np.linalg.qr(C, mode="reduced")
-            except np.linalg.LinAlgError:
-                continue
-
-            # Store QcT (transposed) to avoid transpose per permutation
-            QcT = Qc.T
-
-            # Stack predictors: ALTlr and REFlr on filtered set
-            G = np.column_stack(
-                [
-                    np.asarray(altlr_f, dtype=float),
-                    np.asarray(reflr_f, dtype=float),
-                ]
-            )
-
-            # Residualize G w.r.t. C: G_tilde = (I - Qc Qc^T) G
-            G_tilde = G - Qc @ (QcT @ G)
-
-            # Compute QR of G_tilde
-            try:
-                Qg, Rg = np.linalg.qr(G_tilde, mode="reduced")
-            except np.linalg.LinAlgError:
-                continue
-
-            # Store QgT (transposed)
-            # The projection-based RSS computation uses: proj = Qg @ (QgT @ y_tilde)
-            QgT = Qg.T
-
-            # Degrees of freedom
-            rank_c = np.linalg.matrix_rank(C)
-            p = G.shape[1]  # 2 (ALTlr, REFlr)
-            df1 = p
-            df2 = n_i - rank_c - p
-
-            if df2 <= 0:
-                continue
-
-            caches[variant_index] = VariantFWLCache(
-                idx_masky=idx_masky,
-                QcT=QcT,
-                Qg=Qg,
-                QgT=QgT,
-                df1=df1,
-                df2=df2,
-            )
-
-        return caches
-
     def gene_variant_regressions_permutations(
         self,
         gene_index: int,
@@ -417,235 +269,21 @@ class Cis:
         """
         Perform association testing for the provided gene-variant regression_data and,
         if enabled (mode=perm), compute a scan-level permutation-adjusted p-value.
-
-        Permutation logic:
-        - Keep genotypes fixed.
-        - Permute this gene's phenotype across samples.
-        - For each permutation, re-run the cis-window scan (all variants in the window),
-          recording the best F-statistic and its degrees of freedom.
-        - Compute one p_best per permutation from best F and df2.
-        - "direct": empirical adjusted p-value from best-permutation p-values.
-        - "beta": beta approximation fitted to best-permutation p-values (one p per permutation,
-          derived from best F and its df2).
         """
-        # Nominal association
-        actual_associations = self.gene_variant_regressions(
-            gene_index, self.quan, variant, regression_data
+        return run_gene_variant_regressions_permutations(
+            gene_index=gene_index,
+            quantifications=self.quan,
+            variant=variant,
+            regression_data=regression_data,
+            transf_variants_alt=transf_variants_alt,
+            transf_variants_ref=transf_variants_ref,
+            phenotype_covariate_df=self.phenotype_covariate_df,
+            perm_covariate_df=self.perm_covariate_df,
+            cov=self.cov,
+            num_permutations=self.num_permutations,
+            perm_method=self.perm_method,
+            record_aic=self.record_aic,
         )
-
-        # No permutations requested, return nominal results
-        if self.num_permutations == 0:
-            return actual_associations
-
-        # If no usable data for the nominal pair, cannot permute
-        if regression_data.shape[0] == 0:
-            actual_associations["p_adj"] = np.nan
-            return actual_associations
-
-        # Prepare fixed (unpermuted) inputs for the scan
-        current_gene = self.quan.index[gene_index]
-
-        # Full phenotype across samples (same ordering as genotype columns / self.samples)
-        GEX_full = pd.to_numeric(
-            self.quan.iloc[gene_index, 3:], errors="coerce"
-        ).to_numpy(dtype=float)
-
-        # Optional phenotype-level covariate (NOT permuted)
-        phenotype_cov_full = None
-        if self.phenotype_covariate_df is not None:
-            phenotype_cov_full = (
-                self.phenotype_covariate_df.loc[current_gene].to_numpy().flatten()
-            ).astype(float)
-
-        # Optional sample-level covariates (NOT permuted)
-        cov_values_full = []
-        cov_names = []
-        if self.cov is not None:
-            cov_names = list(self.cov.index)
-            cov_values_full = [
-                pd.to_numeric(self.cov.loc[covariate], errors="coerce")
-                .to_numpy()
-                .flatten()
-                .astype(float)
-                for covariate in cov_names
-            ]
-
-        # Keep the nominal BEST p-value for permutation adjustment
-        nominal_best_p = float(actual_associations["nominal_p"].iloc[0])
-
-        # Freedman-Lane (residual-based) permutation to preserve covariate structure
-        # Build phenotype+covariate mask
-        mask_y = ~np.isnan(GEX_full)
-        if phenotype_cov_full is not None:
-            mask_y &= ~np.isnan(phenotype_cov_full)
-        for cov_val in cov_values_full:
-            mask_y &= ~np.isnan(cov_val)
-
-        # Create mapping from full sample index -> mask_y position
-        # masky_pos[i] = position in mask_y axis, or -1 if not in mask_y
-        n_samples = len(GEX_full)
-        masky_pos = np.full(n_samples, -1, dtype=np.intp)
-        masky_pos[mask_y] = np.arange(np.sum(mask_y))
-
-        # Build FWL caches for fast permutation scanning
-        variant_caches = self.build_variant_fwl_caches(
-            transf_variants_alt,
-            transf_variants_ref,
-            mask_y,
-            masky_pos,
-            phenotype_cov_full,
-            cov_values_full,
-        )
-
-        if not variant_caches:
-            # No variants passed filtering; cannot permute
-            actual_associations["p_adj"] = np.nan
-            return actual_associations
-
-        # Filter arrays by phenotype mask only (work in mask_y axis)
-        y_masky = GEX_full[mask_y].astype(float)
-        phenotype_cov_masky = (
-            phenotype_cov_full[mask_y] if phenotype_cov_full is not None else None
-        )
-        cov_values_masky = [cov_val[mask_y] for cov_val in cov_values_full]
-
-        # Build null design matrix (on mask_y filtered set)
-        cov_blocks = []
-        if phenotype_cov_masky is not None:
-            cov_blocks.append(np.asarray(phenotype_cov_masky, dtype=float))
-        for cov_val in cov_values_masky:
-            cov_blocks.append(np.asarray(cov_val, dtype=float))
-
-        X_null = (
-            np.column_stack([np.ones(len(y_masky))] + cov_blocks)
-            if len(cov_blocks) > 0
-            else np.ones((len(y_masky), 1))
-        )
-
-        # Fit null model and compute residuals
-        # Store yhat_masky and resid_masky for Freedman-Lane permutation
-        yhat_masky, resid_masky = fit_ols_null(y_masky, X_null)
-
-        # Permutation scan with cached decompositions
-        best_p_perms = []
-        n_masky = len(resid_masky)
-
-        # Use per-gene RNG to avoid identical permutation sequences across
-        # multiprocessing workers
-        rng = np.random.default_rng(seed=12345 + gene_index)
-
-        for _ in range(self.num_permutations):
-            # Freedman-Lane: permute residuals in mask_y axis
-            perm = rng.permutation(n_masky)
-            y_perm_masky = yhat_masky + resid_masky[perm]
-
-            best_F = -np.inf
-            best_df1 = None
-            best_df2 = None
-
-            # Re-scan all variants using cached FWL decompositions
-            for variant_index, cache in variant_caches.items():
-                # Slice permuted phenotype using idx_masky (indices into mask_y axis)
-                y_perm = y_perm_masky[cache.idx_masky]
-
-                # FWL residualization w.r.t. covariates: y_tilde = (I - Qc Qc^T) y_perm
-                # Using pre-transposed QcT to avoid transpose per iteration
-                y_tilde = y_perm - cache.QcT.T @ (cache.QcT @ y_perm)
-
-                # Projection-based RSS computation (no G_tilde needed):
-                # proj = Qg @ (QgT @ y_tilde) gives the projection onto G_tilde column space
-                # res = y_tilde - proj
-                # rss1 = res @ res
-                proj = cache.Qg @ (cache.QgT @ y_tilde)
-                res = y_tilde - proj
-                rss1 = float(np.dot(res, res))
-
-                # Null RSS in residual space: y_tilde @ y_tilde
-                rss0 = float(np.dot(y_tilde, y_tilde))
-
-                if rss1 > 0 and cache.df2 > 0:
-                    f_stat = ((rss0 - rss1) / cache.df1) / (rss1 / cache.df2)
-                    f_stat = max(0.0, f_stat)  # Clamp negative F to 0
-                else:
-                    f_stat = np.nan
-
-                if not np.isnan(f_stat) and f_stat > best_F:
-                    best_F = f_stat
-                    best_df1 = cache.df1
-                    best_df2 = cache.df2
-
-            # Compute p-value from best F and its df
-            if best_df1 is not None and best_df2 is not None and best_F > -np.inf:
-                p_best = float(f.sf(best_F, best_df1, best_df2))
-            else:
-                p_best = np.nan
-            best_p_perms.append(p_best)
-
-        adjusted_p_value = np.nan
-
-        if self.perm_method == "direct":
-            # Empirical adjusted p-value based on best-permutation p-values
-            if not np.isnan(nominal_best_p) and len(best_p_perms) > 0:
-                best_p_arr = np.asarray(best_p_perms, dtype=float)
-                best_p_arr = best_p_arr[~np.isnan(best_p_arr)]
-                if len(best_p_arr) > 0:
-                    adjusted_p_value = float(
-                        (1.0 + np.sum(best_p_arr <= nominal_best_p))
-                        / (1.0 + len(best_p_arr))
-                    )
-        else:  # beta
-            pbest = np.asarray(best_p_perms, dtype=float)
-            pbest = pbest[~np.isnan(pbest)]
-            if len(pbest) > 0 and not np.isnan(nominal_best_p):
-                a, b = fit_beta_mle(pbest)
-                # Clip nominal_best_p away from 0 and 1 for CDF stability
-                nominal_best_p_clipped = np.clip(nominal_best_p, 1e-15, 1 - 1e-15)
-                adjusted_p_value = float(beta.cdf(nominal_best_p_clipped, a, b))
-
-        actual_associations["p_adj"] = adjusted_p_value
-        return actual_associations
-
-    def check_grouping(self, altlr_filtered: np.ndarray, reflr_filtered: np.ndarray):
-        """
-        Find if the genotype predictors have adequate variation in the data.
-
-        Parameters:
-        - altlr_filtered: Array of ALTlr values
-        - reflr_filtered: Array of REFlr values
-
-        Returns:
-        - Boolean value showing if both predictors have sufficient variance
-        """
-        # For continuous predictors, check that standard deviation is non-trivial
-        std_altlr = np.std(altlr_filtered)
-        std_reflr = np.std(reflr_filtered)
-
-        eps = 1e-10
-        if std_altlr < eps or std_reflr < eps:
-            return False
-
-        return True
-
-    def residualize_vector(self, y: np.ndarray, X: np.ndarray):
-        """
-        Residualize a vector with respect to a design matrix.
-
-        Parameters:
-        - y: Vector to residualize (n,)
-        - X: Design matrix (n, p), typically includes intercept and covariates
-
-        Returns:
-        - Residuals: y - X @ beta (fitted)
-        """
-        if X.shape[0] != len(y):
-            return np.array([])
-
-        try:
-            beta, *_ = np.linalg.lstsq(X, y.reshape(-1, 1), rcond=None)
-            fitted = X @ beta
-            return (y.reshape(-1, 1) - fitted).flatten()
-        except np.linalg.LinAlgError:
-            return np.array([])
 
     def filter_arrays(
         self,
@@ -658,8 +296,11 @@ class Cis:
         """
         Filter data arrays and do validity checks.
 
+        For s/d parameterization, we check that d = REFlr - ALTlr has variance
+        (this is the allelic difference we're testing).
+
         Parameters:
-        - GEX: Gene expression levels
+        - GEX: Phenotype levels
         - altlr: ALTlr genotype values
         - reflr: REFlr genotype values
         - phenotype_cov: Phenotype-level covariate (None if not provided)
@@ -667,7 +308,7 @@ class Cis:
 
         Returns:
         Tuple of:
-        - GEX_filtered: Filtered gene expression values
+        - GEX_filtered: Filtered phenotype values
         - altlr_filtered: Filtered ALTlr values
         - reflr_filtered: Filtered REFlr values
         - phenotype_cov_filtered: Filtered phenotype-level covariate (or None)
@@ -703,15 +344,13 @@ class Cis:
         )
         cov_values_filtered = [cov_value[mask] for cov_value in cov_values]
 
-        # Ensure each required column has more than one unique value
-        if (
-            len(np.unique(GEX_filtered)) < 2
-            or len(np.unique(altlr_filtered)) < 2
-            or len(np.unique(reflr_filtered)) < 2
-        ):
+        # Ensure GEX has variance
+        if len(np.unique(GEX_filtered)) < 2:
             return [], [], [], None, []
 
-        if not self.check_grouping(altlr_filtered, reflr_filtered):
+        # Check that d = REFlr - ALTlr has variance (this is what we're testing)
+        d_filtered = reflr_filtered - altlr_filtered
+        if not check_d_variance(d_filtered):
             return [], [], [], None, []
 
         return (
@@ -730,8 +369,13 @@ class Cis:
         quantifications: pd.DataFrame,
     ):
         """
-        Find variant and linked data for a gene that has strongest test statistic
-        (using 2-df F-test for ALTlr + REFlr).
+        Find variant and linked data for a gene that has strongest test statistic.
+
+        Uses s/d parameterization:
+        - s = REFlr + ALTlr (total dosage, included in null model)
+        - d = REFlr - ALTlr (allelic difference, the test predictor)
+
+        Selects variant with largest |t_d| (1-df t-test on d coefficient).
 
         Parameters:
         - gene_index: Index of a gene of interest on the quantification file.
@@ -764,7 +408,7 @@ class Cis:
                 for covariate in self.cov.index
             ]
 
-        best_f_stat = -np.inf
+        best_abs_t = -np.inf
         data_best = pd.DataFrame()
         best_variant = ""
 
@@ -783,52 +427,68 @@ class Cis:
             if len(GEX_filtered) == 0:
                 continue
 
-            # Build data dict for this variant
-            data_dict = {
-                "GEX": GEX_filtered,
-                "ALTlr": altlr_filtered,
-                "REFlr": reflr_filtered,
-            }
+            # Compute s and d
+            s = reflr_filtered + altlr_filtered
+            d = reflr_filtered - altlr_filtered
+            n = len(GEX_filtered)
 
+            # Build design matrices for 1-df t-test on d
+            y = GEX_filtered.astype(float)
+
+            # Null model: Phenotype ~ s + phenotype_cov + sample_covariates
+            cov_blocks = [s]
             if phenotype_cov_filtered is not None:
-                data_dict["phenotype_cov"] = phenotype_cov_filtered
+                cov_blocks.append(phenotype_cov_filtered)
+            cov_blocks.extend(cov_values_filtered)
 
-            if self.cov is not None:
-                for covariate, cov_value_filtered in zip(
-                    self.cov.index, cov_values_filtered
-                ):
-                    data_dict[covariate] = cov_value_filtered
-
-            data_df = pd.DataFrame(data_dict)
-
-            # Build design matrices for F-test
-            y = data_df["GEX"].to_numpy(dtype=float)
-
-            # Null model: GEX ~ phenotype_cov + sample_covariates (if any)
-            null_cols = [
-                col for col in data_df.columns if col not in ["GEX", "ALTlr", "REFlr"]
-            ]
             X_null = np.column_stack(
-                [np.ones(len(y))]
-                + [data_df[col].to_numpy(dtype=float) for col in null_cols]
+                [np.ones(n)] + [np.asarray(c, dtype=float) for c in cov_blocks]
             )
 
-            # Alt model: GEX ~ ALTlr + REFlr + phenotype_cov + sample_covariates
+            # Alt model: adds d
             X_alt = np.column_stack(
-                [
-                    np.ones(len(y)),
-                    data_df["ALTlr"].to_numpy(dtype=float),
-                    data_df["REFlr"].to_numpy(dtype=float),
-                ]
-                + [data_df[col].to_numpy(dtype=float) for col in null_cols]
+                [np.ones(n), s, d]
+                + (
+                    [phenotype_cov_filtered]
+                    if phenotype_cov_filtered is not None
+                    else []
+                )
+                + [np.asarray(c, dtype=float) for c in cov_values_filtered]
             )
 
             result = fit_ols_and_test(y, X_null, X_alt)
-            f_stat = result["f_stat"]
 
-            if f_stat > best_f_stat and not np.isnan(f_stat):
-                best_f_stat = f_stat
-                data_best = data_df
+            # Extract t-statistic for d (index 2 in X_alt: intercept=0, s=1, d=2)
+            beta_d = result["beta_alt"][2]
+            se_d = result["se_alt"][2]
+
+            if se_d > 0 and np.isfinite(se_d):
+                t_stat = beta_d / se_d
+            else:
+                t_stat = np.nan
+
+            abs_t = np.abs(t_stat) if np.isfinite(t_stat) else -np.inf
+
+            if abs_t > best_abs_t:
+                best_abs_t = abs_t
+
+                # Build data dict for this variant (keeping ALTlr/REFlr for compatibility)
+                data_dict = {
+                    "GEX": GEX_filtered,
+                    "ALTlr": altlr_filtered,
+                    "REFlr": reflr_filtered,
+                }
+
+                if phenotype_cov_filtered is not None:
+                    data_dict["phenotype_cov"] = phenotype_cov_filtered
+
+                if self.cov is not None:
+                    for covariate, cov_value_filtered in zip(
+                        self.cov.index, cov_values_filtered
+                    ):
+                        data_dict[covariate] = cov_value_filtered
+
+                data_best = pd.DataFrame(data_dict)
                 best_variant = variant_index
 
         return best_variant, data_best
@@ -845,7 +505,7 @@ class Cis:
         Process data for association testing when in all variants mode.
 
         Parameters:
-        - GEX: Gene expression levels.
+        - GEX: Phenotype levels.
         - altlr: ALTlr genotype values
         - reflr: REFlr genotype values
         - phenotype_cov: Phenotype-level covariate (None if not provided)
@@ -951,8 +611,13 @@ class Cis:
         regression_data: pd.DataFrame,
     ):
         """
-        Find associations between the gene expression values of a gene and variants
-        by performing OLS regressions with F-test for ALTlr + REFlr jointly.
+        Find associations between phenotype levels and variants using s/d parameterization.
+
+        Model: Phenotype ~ s + d + covariates
+        where s = REFlr + ALTlr (total dosage) and d = REFlr - ALTlr (allelic difference).
+
+        Test: H0: β_d = 0 (1-df t-test), which tests if the two alleles have different
+        effects on phenotype (i.e., molQTL signal).
 
         Parameters:
         - gene_index: Index of a gene of interest on the quantification file.
@@ -962,118 +627,15 @@ class Cis:
             optional phenotype_cov, and sample-level covariates
 
         Returns:
-        - associations: Dataframe with statistics of the strengths of associations
+        - associations: Dataframe with statistics (beta_s, se_s, beta_d, se_d, nominal_p)
         """
-        associations = []
-        current_gene = quantifications.index[gene_index]
-
-        def create_association(
-            gene,
-            variant,
-            beta_altlr,
-            se_altlr,
-            beta_reflr,
-            se_reflr,
-            p_value,
-            r2_alt=None,
-            aic_null=None,
-            aic_alt=None,
-            delta_aic=None,
-        ):
-            association = {
-                "phenotype": gene,
-                "variant": variant,
-                "number_of_samples": regression_data.shape[0],
-                "beta_altlr": beta_altlr,
-                "se_altlr": se_altlr,
-                "beta_reflr": beta_reflr,
-                "se_reflr": se_reflr,
-                "nominal_p": p_value,
-                "r2_alt": r2_alt,
-            }
-            if self.record_aic:
-                association["aic_null"] = aic_null
-                association["aic_alt"] = aic_alt
-                association["delta_aic_alt_minus_null"] = delta_aic
-            return association
-
-        if len(regression_data) == 0:
-            associations.append(
-                create_association(
-                    current_gene,
-                    variant,
-                    np.nan,
-                    np.nan,
-                    np.nan,
-                    np.nan,
-                    np.nan,
-                    np.nan,
-                )
-            )
-            return pd.DataFrame(associations)
-
-        y = regression_data["GEX"].to_numpy(dtype=float)
-
-        # Build design matrices
-        # Null model: GEX ~ (phenotype_cov if present) + sample_covariates
-        null_cols = [
-            col
-            for col in regression_data.columns
-            if col not in ["GEX", "ALTlr", "REFlr"]
-        ]
-        X_null = np.column_stack(
-            [np.ones(len(y))]
-            + [regression_data[col].to_numpy(dtype=float) for col in null_cols]
+        return run_gene_variant_regressions(
+            gene_index=gene_index,
+            quantifications=quantifications,
+            variant=variant,
+            regression_data=regression_data,
+            record_aic=self.record_aic,
         )
-
-        # Alt model: GEX ~ ALTlr + REFlr + (phenotype_cov if present) + sample_covariates
-        X_alt = np.column_stack(
-            [
-                np.ones(len(y)),
-                regression_data["ALTlr"].to_numpy(dtype=float),
-                regression_data["REFlr"].to_numpy(dtype=float),
-            ]
-            + [regression_data[col].to_numpy(dtype=float) for col in null_cols]
-        )
-
-        # Perform F-test
-        result = fit_ols_and_test(y, X_null, X_alt)
-
-        beta_altlr = result["beta_alt"][
-            1
-        ]  # Index 0 is intercept, 1 is ALTlr, 2 is REFlr
-        se_altlr = result["se_alt"][1]
-        beta_reflr = result["beta_alt"][2]
-        se_reflr = result["se_alt"][2]
-        pval = result["p_value"]
-        r2_alt = result["r2_alt"]
-
-        # AIC recording
-        aic_null = aic_alt = delta_aic = None
-        if self.record_aic:
-            aic_null = calculate_aic_full_ols(
-                y, X_null[:, 1:]
-            )  # Exclude intercept (it's added by the function)
-            aic_alt = calculate_aic_full_ols(y, X_alt[:, 1:])  # Exclude intercept
-            delta_aic = aic_alt - aic_null
-
-        associations.append(
-            create_association(
-                current_gene,
-                variant,
-                beta_altlr,
-                se_altlr,
-                beta_reflr,
-                se_reflr,
-                pval,
-                r2_alt,
-                aic_null,
-                aic_alt,
-                delta_aic,
-            )
-        )
-
-        return pd.DataFrame(associations)
 
     def calculate_associations(self):
         """
