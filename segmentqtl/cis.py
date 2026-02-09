@@ -173,12 +173,13 @@ class Cis:
         - variants_ref: Subset of REF genotype dataframe that contains only those variants
             that are inside the given window
         """
-        subset_condition = (self.variant_positions > current_start) & (
-            self.variant_positions < current_end
+        subset_condition = (self.variant_positions >= current_start) & (
+            self.variant_positions <= current_end
         )
         variants_alt = self.geno_alt.loc[subset_condition]
         variants_ref = self.geno_ref.loc[subset_condition]
-        return variants_alt, variants_ref
+        variant_pos = self.variant_positions[subset_condition]
+        return variants_alt, variants_ref, variant_pos
 
     def gene_variants_common_segment(
         self,
@@ -186,6 +187,7 @@ class Cis:
         end: int,
         variants_alt: pd.DataFrame,
         variants_ref: pd.DataFrame,
+        variant_pos: np.ndarray,
     ):
         """
         Filter variants to ensure that the gene and variants that are in the same
@@ -198,17 +200,13 @@ class Cis:
             as the gene of interest
         - variants_ref: Subset of REF genotype file. Only variants that are in the same window
             as the gene of interest
+        - variant_pos: Precomputed variant positions (sliced from self.variant_positions)
 
         Returns:
         - variants_alt, variants_ref: Filtered and masked subsets of genotype dataframes.
         """
         gene_start = start + self.window
         gene_end = end - self.window
-
-        index_array = variants_alt.index.astype(str).to_numpy()
-        variant_pos = np.fromiter(
-            (int(s.split(":")[1]) for s in index_array), dtype=np.int64
-        )
 
         alt_arr = variants_alt.to_numpy(dtype=float, copy=True)
         ref_arr = variants_ref.to_numpy(dtype=float, copy=True)
@@ -391,6 +389,18 @@ class Cis:
         GEX = pd.to_numeric(
             quantifications.iloc[gene_index, 3:], errors="coerce"
         ).to_numpy()
+
+        # In perm mode, exclude samples with missing perm_cov so the nominal
+        # best-variant scan uses the same sample set as the permutation null.
+        # perm_cov is NOT added as a predictor — only used to define the mask.
+        if self.num_permutations > 0 and self.perm_covariate_df is not None:
+            perm_cov = (
+                self.perm_covariate_df.loc[current_gene]
+                .to_numpy()
+                .flatten()
+                .astype(float)
+            )
+            GEX[np.isnan(perm_cov)] = np.nan
 
         # Get phenotype-level covariate if available
         phenotype_cov = None
@@ -655,18 +665,15 @@ class Cis:
 
         limit = self.quan.shape[0]  # For testing, use small number, eg. 3
 
-        pool = Pool(processes=self.num_cores)
-
-        # Map the gene indices to the helper function using the Pool
-        # and print the progress
-        full_associations = list(
-            tqdm(
-                pool.imap(self.calculate_associations_helper, range(limit)), total=limit
+        with Pool(processes=self.num_cores) as pool:
+            # Map the gene indices to the helper function using the Pool
+            # and print the progress
+            full_associations = list(
+                tqdm(
+                    pool.imap(self.calculate_associations_helper, range(limit)),
+                    total=limit,
+                )
             )
-        )
-
-        pool.close()
-        pool.join()
 
         end = time()
         print("The time of execution: ", (end - start) / 60, " min")
@@ -692,12 +699,16 @@ class Cis:
         - A dataframe containing the association results for the specified gene index.
         """
         current_start, current_end = self.start_end_gene_window(gene_index)
-        current_variants_alt, current_variants_ref = self.get_variants_for_gene_window(
-            current_start, current_end
+        current_variants_alt, current_variants_ref, variant_pos = (
+            self.get_variants_for_gene_window(current_start, current_end)
         )
 
         transf_variants_alt, transf_variants_ref = self.gene_variants_common_segment(
-            current_start, current_end, current_variants_alt, current_variants_ref
+            current_start,
+            current_end,
+            current_variants_alt,
+            current_variants_ref,
+            variant_pos,
         )
 
         if self.all_variants_mode:

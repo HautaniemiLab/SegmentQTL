@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import List, Optional
 
 import numpy as np
 import pandas as pd
@@ -71,8 +72,8 @@ def build_variant_fwl_caches(
     transf_variants_ref: pd.DataFrame,
     mask_y: np.ndarray,
     masky_pos: np.ndarray,
-    phenotype_cov_full: np.ndarray | None,
-    cov_values_full: list,
+    phenotype_cov_full: Optional[np.ndarray],
+    cov_values_full: List[np.ndarray],
     min_samples: int = 30,
 ):
     """
@@ -662,9 +663,9 @@ def gene_variant_regressions_permutations(
     regression_data: pd.DataFrame,
     transf_variants_alt: pd.DataFrame,
     transf_variants_ref: pd.DataFrame,
-    phenotype_covariate_df: pd.DataFrame | None,
-    perm_covariate_df: pd.DataFrame | None,
-    cov: pd.DataFrame | None,
+    phenotype_covariate_df: Optional[pd.DataFrame],
+    perm_covariate_df: Optional[pd.DataFrame],
+    cov: Optional[pd.DataFrame],
     num_permutations: int,
     perm_method: str,
     record_aic: bool = False,
