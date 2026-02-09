@@ -2,7 +2,7 @@ from glob import glob
 from os import path
 
 import pandas as pd
-import scipy.stats
+from multipy.fdr import qvalue
 
 
 def combine_chromosome(outdir: str):
@@ -24,24 +24,35 @@ def combine_chromosome(outdir: str):
         dfs.append(df)
 
     combined_df = pd.concat(dfs, ignore_index=True)
-    combined_df = combined_df.dropna(subset=["p_adj"])
+
+    # Use p_adj (permutation-adjusted) if available, otherwise fall back to nominal_p
+    if "p_adj" in combined_df.columns and combined_df["p_adj"].notna().any():
+        combined_df["pval_for_fdr"] = combined_df["p_adj"]
+    elif "nominal_p" in combined_df.columns:
+        combined_df["pval_for_fdr"] = combined_df["nominal_p"]
+    else:
+        raise ValueError(
+            "No suitable p-value column found. Expected 'p_adj' or 'nominal_p'."
+        )
+
+    combined_df = combined_df.dropna(subset=["pval_for_fdr"])
 
     return combined_df
 
 
 def fdr(outdir: str):
     """
-    Perform Benjamini Hochberg false discovery rate correction to mapping results.
+    Perform Storey-Tibshirani q-value false discovery rate correction to mapping results.
 
     Parameters:
     - outdir: Directory to which the mapping results have been saved.
-    - threshold: Cutoff value for fdr correction.
 
     Returns:
-    - full_res: Dataframe with all mapping results including a column for fdr corrected p-values.
+    - full_res: Dataframe with all mapping results including a column for q-values.
     """
     full_res = combine_chromosome(outdir)
-    perm_pvals = full_res["p_adj"]
-    bh_p_values = scipy.stats.false_discovery_control(perm_pvals)
-    full_res["fdr"] = bh_p_values
+    perm_pvals = full_res["pval_for_fdr"].values
+    _, qvals = qvalue(perm_pvals, verbose=False)
+    full_res["fdr"] = qvals
+    full_res = full_res.drop(columns=["pval_for_fdr"])
     return full_res
