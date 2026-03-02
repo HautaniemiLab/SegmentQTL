@@ -19,6 +19,9 @@ from statistical_utils import (
 
 
 class Cis:
+    # Chromosome ordering for trans negative control (chr+1, wrapping)
+    _CHROMOSOMES = [f"chr{i}" for i in range(1, 23)] + ["chrX"]
+
     def __init__(
         self,
         chromosome,
@@ -36,6 +39,9 @@ class Cis:
         window,
         num_cores,
         record_aic,
+        neg_control=False,
+        neg_control_max_variants=2000,
+        genotypes_dir=None,
     ):
         self.chromosome = chromosome
 
@@ -121,6 +127,45 @@ class Cis:
         else:
             self.num_permutations = num_permutations
 
+        # ── Negative control mode ──
+        self.neg_control = neg_control
+        self.neg_control_max_variants = neg_control_max_variants
+
+        if neg_control:
+            if genotypes_dir is None:
+                raise ValueError(
+                    "--genotypes directory path is required for trans negative control mode."
+                )
+            trans_chr = self._get_trans_chromosome(chromosome)
+            print(
+                f"[neg_control] Gene chromosome: {chromosome} → variant chromosome: {trans_chr}"
+            )
+            print(
+                "[neg_control] Segment consistency filtering is not applied "
+                "(not meaningful across chromosomes)."
+            )
+            trans_alt_file = f"{genotypes_dir}/{trans_chr}_ALTlr.csv"
+            trans_ref_file = f"{genotypes_dir}/{trans_chr}_REFlr.csv"
+
+            self.neg_geno_alt = self.load_and_validate_file(trans_alt_file, index_col=0)
+            self.neg_geno_alt = self.neg_geno_alt.loc[
+                :, self.neg_geno_alt.columns.isin(self.samples)
+            ]
+            self.neg_geno_alt = self.neg_geno_alt[self.samples]
+
+            self.neg_geno_ref = self.load_and_validate_file(trans_ref_file, index_col=0)
+            self.neg_geno_ref = self.neg_geno_ref.loc[
+                :, self.neg_geno_ref.columns.isin(self.samples)
+            ]
+            self.neg_geno_ref = self.neg_geno_ref[self.samples]
+
+            # Align to common variant set
+            common_neg = self.neg_geno_alt.index.intersection(self.neg_geno_ref.index)
+            self.neg_geno_alt = self.neg_geno_alt.loc[common_neg]
+            self.neg_geno_ref = self.neg_geno_ref.loc[common_neg]
+
+            print(f"[neg_control] Loaded {len(common_neg)} variants from {trans_chr}")
+
     def load_and_validate_file(self, file_path: str, index_col: int):
         """
         Load a CSV file and validate its existence and content.
@@ -180,6 +225,50 @@ class Cis:
         variants_ref = self.geno_ref.loc[subset_condition]
         variant_pos = self.variant_positions[subset_condition]
         return variants_alt, variants_ref, variant_pos
+
+    # ── Negative control helpers ──────────────────────────────────────────
+
+    @classmethod
+    def _get_trans_chromosome(cls, chromosome: str) -> str:
+        """Return the next chromosome in the ordering (wraps around)."""
+        if chromosome in cls._CHROMOSOMES:
+            idx = cls._CHROMOSOMES.index(chromosome)
+            return cls._CHROMOSOMES[(idx + 1) % len(cls._CHROMOSOMES)]
+        raise ValueError(
+            f"Unknown chromosome '{chromosome}' for trans negative control. "
+            f"Expected one of {cls._CHROMOSOMES}."
+        )
+
+    def _subsample_variants(
+        self,
+        variants_alt: pd.DataFrame,
+        variants_ref: pd.DataFrame,
+        gene_index: int,
+    ):
+        """Randomly subsample to at most neg_control_max_variants (reproducible per gene)."""
+        n_total = len(variants_alt)
+        if n_total <= self.neg_control_max_variants:
+            return variants_alt, variants_ref
+        rng = np.random.default_rng(seed=42 + gene_index)
+        idx = np.sort(rng.choice(n_total, self.neg_control_max_variants, replace=False))
+        return variants_alt.iloc[idx], variants_ref.iloc[idx]
+
+    def get_neg_control_variants(self, gene_index: int):
+        """
+        Fetch trans negative-control variants for a gene.
+
+        Returns subsampled variants from the next chromosome. These have no
+        plausible cis-regulatory relationship to the gene, making them a pure
+        null for checking pipeline calibration.
+
+        Returns:
+        - variants_alt, variants_ref: DataFrames of (subsampled) trans genotypes
+        """
+        if len(self.neg_geno_alt) == 0:
+            return pd.DataFrame(), pd.DataFrame()
+        return self._subsample_variants(
+            self.neg_geno_alt, self.neg_geno_ref, gene_index
+        )
 
     def gene_variants_common_segment(
         self,
@@ -685,12 +774,10 @@ class Cis:
         """
         Helper function to calculate associations for a single gene index.
 
-        This function performs several steps to calculate the associations for a
-        specific gene index:
-        1. Determines the start and end positions for the gene window.
-        2. Retrieves the variants within the gene window.
-        3. Transforms the variants based on a common segment.
-        4. Performs regressions to calculate associations.
+        In trans negative-control mode (--neg_control), variants are drawn from a
+        different chromosome (chr+1, wrapping) with no plausible cis-regulatory link
+        to the gene. Segment consistency filtering is not applied because it is not
+        meaningful across chromosomes.
 
         Parameters:
         - gene_index (int): The index of the gene for which associations are being calculated.
@@ -698,18 +785,30 @@ class Cis:
         Returns:
         - A dataframe containing the association results for the specified gene index.
         """
-        current_start, current_end = self.start_end_gene_window(gene_index)
-        current_variants_alt, current_variants_ref, variant_pos = (
-            self.get_variants_for_gene_window(current_start, current_end)
-        )
+        if self.neg_control:
+            # ── Trans negative control: skip segmentation filtering ──
+            # Segment consistency filtering is not meaningful across chromosomes.
+            transf_variants_alt, transf_variants_ref = self.get_neg_control_variants(
+                gene_index
+            )
+            if transf_variants_alt.empty:
+                return pd.DataFrame()
+        else:
+            # ── Normal cis mode ──
+            current_start, current_end = self.start_end_gene_window(gene_index)
+            current_variants_alt, current_variants_ref, variant_pos = (
+                self.get_variants_for_gene_window(current_start, current_end)
+            )
 
-        transf_variants_alt, transf_variants_ref = self.gene_variants_common_segment(
-            current_start,
-            current_end,
-            current_variants_alt,
-            current_variants_ref,
-            variant_pos,
-        )
+            transf_variants_alt, transf_variants_ref = (
+                self.gene_variants_common_segment(
+                    current_start,
+                    current_end,
+                    current_variants_alt,
+                    current_variants_ref,
+                    variant_pos,
+                )
+            )
 
         if self.all_variants_mode:
             result = self.process_all_variants(
@@ -719,6 +818,27 @@ class Cis:
             best_variant, data_best = self.best_variant_data(
                 gene_index, transf_variants_alt, transf_variants_ref, self.quan
             )
+
+            # Guard: if no variant survived filtering, return NA result
+            if best_variant == "" or data_best.empty:
+                current_gene = self.quan.index[gene_index]
+                return pd.DataFrame(
+                    [
+                        {
+                            "phenotype": current_gene,
+                            "variant": np.nan,
+                            "number_of_samples": 0,
+                            "beta_s": np.nan,
+                            "se_s": np.nan,
+                            "beta_d": np.nan,
+                            "se_d": np.nan,
+                            "t_stat_d": np.nan,
+                            "nominal_p": np.nan,
+                            "r2_alt": np.nan,
+                            "p_adj": np.nan,
+                        }
+                    ]
+                )
 
             association_res = self.gene_variant_regressions_permutations(
                 gene_index,
