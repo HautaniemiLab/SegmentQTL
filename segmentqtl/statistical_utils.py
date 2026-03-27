@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -31,6 +31,125 @@ class VariantFWLCache:
     QcT: np.ndarray  # transposed reduced Q for covariates+s; shape (rank_c, n_i)
     q_d: np.ndarray  # normalized residualized d vector; shape (n_i,)
     df2: int  # denominator df (n - p_null - 1)
+
+
+def standardize_variants(
+    d_raw: np.ndarray,
+    coverage_tau: float,
+    n_total: int,
+    min_obs: int = 30,
+) -> Tuple[np.ndarray, List[np.ndarray], np.ndarray, np.ndarray]:
+    """
+    Standardise each variant predictor d_v on its observed entries.
+
+    Applies a coverage filter: only variants with at least
+    max(min_obs, coverage_tau * n_total) observed samples are kept.
+
+    Parameters:
+    - d_raw: (p, n) allelic difference d = REFlr - ALTlr, NaN where missing.
+    - coverage_tau: minimum fraction of n_total required for a variant to be kept.
+    - n_total: total number of samples (for coverage filter).
+    - min_obs: hard minimum observation count.
+
+    Returns:
+    - d_std: (p_kept, n) standardised, NaN where missing.
+    - obs_masks: list of ndarray -- observed sample indices per kept variant.
+    - keep_idx: (p_kept,) original row indices that were retained.
+    - sd_vec: (p_kept,) per-variant SD used for standardisation (for
+      back-transforming coefficients to raw units).
+    """
+    p, n = d_raw.shape
+    min_required = max(min_obs, int(coverage_tau * n_total))
+
+    d_std_rows: List[np.ndarray] = []
+    obs_masks: List[np.ndarray] = []
+    keep: List[int] = []
+    sd_list: List[float] = []
+
+    for v in range(p):
+        idx = np.flatnonzero(~np.isnan(d_raw[v]))
+        if len(idx) < min_required:
+            continue
+
+        vals = d_raw[v, idx]
+        mu = np.mean(vals)
+        sd = np.std(vals)
+
+        if sd < 1e-10:
+            continue
+
+        row = np.full(n, np.nan)
+        row[idx] = (vals - mu) / sd
+
+        d_std_rows.append(row)
+        obs_masks.append(idx)
+        keep.append(v)
+        sd_list.append(float(sd))
+
+    keep_idx = np.array(keep, dtype=int)
+    sd_vec = np.array(sd_list, dtype=float)
+    if len(keep) == 0:
+        d_std = np.empty((0, n))
+    else:
+        d_std = np.vstack(d_std_rows)
+
+    return d_std, obs_masks, keep_idx, sd_vec
+
+
+def standardize_variants_bootstrap(
+    d_raw: np.ndarray,
+    min_obs_boot: int = 20,
+) -> Tuple[np.ndarray, List[np.ndarray], np.ndarray]:
+    """
+    Standardise variants for a bootstrap subsample without coverage filtering.
+
+    Unlike standardize_variants, this function does not apply the coverage_tau
+    threshold. It only drops a variant if the subsample has fewer than
+    min_obs_boot observed entries or zero variance. This ensures that the
+    stability-selection frequency pi_v reflects "selected when fit is
+    attempted", not "selected AND passed a second coverage filter".
+
+    Parameters:
+    - d_raw: (p, n_sub) raw d values for the subsample, NaN = missing.
+    - min_obs_boot: hard minimum of observed entries per variant.
+
+    Returns:
+    - d_std: (p_kept, n_sub) standardised, NaN where missing.
+    - obs_masks: list of ndarray -- observed indices per kept variant.
+    - keep_idx: (p_kept,) original row indices that were retained.
+    """
+    p, n = d_raw.shape
+
+    d_std_rows: List[np.ndarray] = []
+    obs_masks: List[np.ndarray] = []
+    keep: List[int] = []
+
+    for v in range(p):
+        idx = np.flatnonzero(~np.isnan(d_raw[v]))
+        if len(idx) < min_obs_boot:
+            continue
+
+        vals = d_raw[v, idx]
+        mu = np.mean(vals)
+        sd = np.std(vals)
+
+        if sd < 1e-10:
+            continue
+
+        row = np.full(n, np.nan)
+        row[idx] = (vals - mu) / sd
+
+        d_std_rows.append(row)
+        obs_masks.append(idx)
+        keep.append(v)
+
+    keep_idx = np.array(keep, dtype=int)
+    if len(keep) == 0:
+        d_std = np.empty((0, n))
+    else:
+        d_std = np.vstack(d_std_rows)
+
+    return d_std, obs_masks, keep_idx
 
 
 def check_d_variance(d_filtered: np.ndarray, eps: float = 1e-10) -> bool:

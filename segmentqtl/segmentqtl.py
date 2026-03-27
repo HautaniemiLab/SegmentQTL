@@ -2,7 +2,6 @@ from argparse import ArgumentParser
 from os import makedirs, path
 
 from cis import Cis
-from fdr_correction import fdr
 from finemapping import Finemapping
 
 
@@ -12,7 +11,7 @@ def main():
         "--mode",
         type=str,
         default="perm",
-        help="Nominal (nominal), permutation (perm), fdr correction (fdr), or finemapping (finemap)",
+        help="Nominal (nominal), permutation (perm), or finemapping (finemap)",
     )
     parser.add_argument(
         "--chromosome",
@@ -91,12 +90,6 @@ def main():
         help="Directory where intermediate results are saved",
     )
     parser.add_argument(
-        "--fdr_out",
-        type=str,
-        help="File path to which fdr corrected full results are saved to. Must be a csv file.",
-    )
-
-    parser.add_argument(
         "--record_aic",
         action="store_true",
         help="Record AIC scores for associations.",
@@ -152,20 +145,20 @@ def main():
     parser.add_argument(
         "--n_lambda",
         type=int,
-        default=100,
-        help="Number of lambda grid points for BIC path. Default: 100.",
+        default=30,
+        help="Number of lambda grid points for CV-based selection. Default: 30.",
     )
     parser.add_argument(
         "--lambda_ratio",
         type=float,
         default=0.01,
-        help="Ratio lam_min/lam_max for the lambda grid. Default: 0.01.",
+        help="Lower-bound ratio lam_min/lam_max for lambda grid. Default: 0.01.",
     )
     parser.add_argument(
-        "--ld_threshold",
+        "--cv_tau",
         type=float,
         default=0.8,
-        help="r-squared threshold for LD clustering. Default: 0.8.",
+        help="Range-based CV tolerance: fraction of improvement over null sacrificed for sparsity (0.8 = keep lambdas within 80%% of range). Default: 0.8.",
     )
     parser.add_argument(
         "--min_obs_boot",
@@ -210,7 +203,7 @@ def main():
 
         # ── Finemapping mode ──
         if mode == "finemap":
-            mapping = Finemapping(
+            finemapper = Finemapping(
                 chromosome,
                 quantifications_file,
                 covariates_file,
@@ -228,9 +221,10 @@ def main():
                 stability_threshold=args.stability_threshold,
                 n_lambda=args.n_lambda,
                 lambda_ratio=args.lambda_ratio,
-                ld_threshold=args.ld_threshold,
+                cv_tau=args.cv_tau,
                 min_obs_boot=args.min_obs_boot,
-            ).calculate_finemapping(phenotype_id=args.phenotype_id)
+            )
+            mapping = finemapper.calculate_finemapping(phenotype_id=args.phenotype_id)
 
             mapping["chr"] = chromosome
 
@@ -239,9 +233,13 @@ def main():
 
             if args.phenotype_id is not None:
                 fname = f"{out_dir}finemap_{chromosome}_{args.phenotype_id}.csv"
+                diag_fname = f"{out_dir}finemap_bootstrap_nonzero_{chromosome}_{args.phenotype_id}.csv"
             else:
                 fname = f"{out_dir}finemap_{chromosome}.csv"
+                diag_fname = f"{out_dir}finemap_bootstrap_nonzero_{chromosome}.csv"
+
             mapping.to_csv(fname, index=False)
+            finemapper.bootstrap_nonzero_diagnostics.to_csv(diag_fname, index=False)
             return
 
         # Validate: permutation mode with all_variants is not supported
@@ -261,10 +259,6 @@ def main():
             raise ValueError(
                 "--neg_control with --all_variants is only supported in nominal mode."
             )
-
-        # Validate: neg_control requires copynumber when in perm mode
-        # (same as normal perm — ensures identical masking in trans and cis)
-        # Already covered by the copynumber check above.
 
         # Perform cis-mapping, nominal or with permutations
         mapping = Cis(
@@ -308,9 +302,5 @@ def main():
 
         mapping.to_csv(fname, index=False)
 
-    elif mode == "fdr":
-        out_path = args.fdr_out
-        fdr_corrected_res = fdr(out_dir)
-        fdr_corrected_res.to_csv(out_path, index=False)
     else:
-        print(f"Invalid mode: {mode}, please select nominal, perm, finemap, or fdr.")
+        print(f"Invalid mode: {mode}, please select nominal, perm, or finemap.")

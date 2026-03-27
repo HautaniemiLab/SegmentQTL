@@ -1,22 +1,3 @@
-"""
-SegmentQTL finemapping mode: missing-aware Elastic Net with stability selection.
-
-Performs statistical finemapping for molecular QTLs using:
-1. Segment-aware filtering (phenotype & variant on same segment, identical to
-   cis mode)
-2. Missing-aware Elastic Net via coordinate descent (NaN entries from segment
-   filtering are handled natively -- never imputed or set to zero)
-3. BIC-based regularisation-path selection
-4. Stability selection for robust variant identification
-5. LD-aware clustering for credible-set-like output
-
-References
-----------
-Meinshausen & Bühlmann (2010).  Stability selection.  JRSS-B.
-Zou & Hastie (2005).  Regularization and variable selection via the Elastic Net.
-"""
-
-import warnings
 from multiprocessing import Pool
 from os import path
 from time import time
@@ -24,17 +5,19 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from scipy.cluster.hierarchy import fcluster, linkage
-from scipy.spatial.distance import squareform
 from tqdm import tqdm
 
-# ---------------------------------------------------------------------------
-#  Missing-aware Elastic Net coordinate-descent solver
-# ---------------------------------------------------------------------------
+from segment_utils import (
+    filter_variants_to_common_segment,
+    phenotype_window_bounds,
+    variants_in_window,
+)
+from statistical_utils import standardize_variants, standardize_variants_bootstrap
 
 
 class MissingAwareElasticNet:
-    """Coordinate-descent Elastic Net that handles per-entry missingness.
+    """
+    Coordinate-descent Elastic Net that handles per-entry missingness.
 
     The penalised objective (only variant coefficients beta_v are penalised):
 
@@ -45,14 +28,10 @@ class MissingAwareElasticNet:
 
     where O_i is the set of variants observed for sample i.
 
-    Parameters
-    ----------
-    alpha_en : float
-        Mixing parameter in [0, 1].  1 = Lasso, 0 = Ridge.
-    max_iter : int
-        Maximum full coordinate-descent passes.
-    tol : float
-        Convergence tolerance (max |delta beta|).
+    Parameters:
+    - alpha_en: Mixing parameter in [0, 1]. 1 = Lasso, 0 = Ridge.
+    - max_iter: Maximum full coordinate-descent passes.
+    - tol: Convergence tolerance (max |delta beta|).
     """
 
     def __init__(self, alpha_en: float = 0.5, max_iter: int = 1000, tol: float = 1e-6):
@@ -60,23 +39,17 @@ class MissingAwareElasticNet:
         self.max_iter = max_iter
         self.tol = tol
 
-    # ---- helpers ---------------------------------------------------------
-
-    @staticmethod
-    def _soft_threshold(z: float, lam: float) -> float:
+    def _soft_threshold(self, z: float, lam: float) -> float:
         """Soft-thresholding operator S(z, lam) = sign(z) max(|z| - lam, 0)."""
         return float(np.sign(z)) * max(abs(z) - lam, 0.0)
 
-    @staticmethod
-    def _ols(y: np.ndarray, X: np.ndarray) -> np.ndarray:
+    def _ols(self, y: np.ndarray, X: np.ndarray) -> np.ndarray:
         """Ordinary least-squares: y = X theta.  Returns theta."""
         try:
             theta, *_ = np.linalg.lstsq(X, y, rcond=None)
         except np.linalg.LinAlgError:
             theta = np.zeros(X.shape[1])
         return theta
-
-    # ---- core methods ----------------------------------------------------
 
     def compute_lambda_max(
         self,
@@ -85,7 +58,8 @@ class MissingAwareElasticNet:
         obs_masks: List[np.ndarray],
         X_unpen: np.ndarray,
     ) -> float:
-        """Smallest lambda for which all beta_v = 0.
+        """
+        Smallest lambda for which all beta_v = 0.
 
         At beta = 0 the sub-gradient condition requires
         |sum_{i in O_v} d_tilde_{v,i} r_i^{(0)}| <= lam * alpha_en
@@ -116,30 +90,29 @@ class MissingAwareElasticNet:
         beta_init: Optional[np.ndarray] = None,
         theta_init: Optional[np.ndarray] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int]:
-        """Fit the model for a single lambda value.
+        """
+        Fit the model for a single lambda value.
 
-        Parameters
-        ----------
-        y         : (n,)  phenotype (centred recommended).
-        d_std     : (p, n) standardised variant predictors, NaN where missing.
-        obs_masks : list of index arrays; obs_masks[v] = observed sample indices.
-        X_unpen   : (n, q) unpenalised design matrix (intercept + covariates).
-        lam       : penalty magnitude.
-        beta_init : optional warm-start for beta.
-        theta_init: optional warm-start for theta.
+        Parameters:
+        - y: (n,) phenotype (centred recommended).
+        - d_std: (p, n) standardised variant predictors, NaN where missing.
+        - obs_masks: list of index arrays; obs_masks[v] = observed sample indices.
+        - X_unpen: (n, q) unpenalised design matrix (intercept + covariates).
+        - lam: penalty magnitude.
+        - beta_init: optional warm-start for beta.
+        - theta_init: optional warm-start for theta.
 
-        Returns
-        -------
-        beta   : (p,) penalised coefficients.
-        theta  : (q,) unpenalised coefficients.
-        r      : (n,) final residuals.
-        n_iter : number of iterations used.
+        Returns:
+        - beta: (p,) penalised coefficients.
+        - theta: (q,) unpenalised coefficients.
+        - r: (n,) final residuals.
+        - n_iter: number of iterations used.
         """
         p, n = d_std.shape
         lam1 = lam * self.alpha_en
         lam2 = lam * (1.0 - self.alpha_en)
 
-        # --- initialise ---
+        # Initialise
         theta = theta_init.copy() if theta_init is not None else self._ols(y, X_unpen)
         beta = beta_init.copy() if beta_init is not None else np.zeros(p)
 
@@ -158,7 +131,7 @@ class MissingAwareElasticNet:
             if len(idx) > 0:
                 G[v] = np.sum(d_std[v, idx] ** 2)
 
-        # --- coordinate descent ---
+        # Coordinate descent
         n_iter = 0
         for it in range(self.max_iter):
             max_change = 0.0
@@ -211,470 +184,195 @@ class MissingAwareElasticNet:
 
         return beta, theta, r, n_iter
 
-    @staticmethod
-    def compute_bic(n: int, rss: float, n_nonzero: int, n_unpen: int) -> float:
-        """BIC = n log(RSS / n) + k log(n),  k = n_nonzero + n_unpen.
-
-        Note: n is the *global* sample count (all samples with non-missing
-        phenotype and covariates), even though individual variants may have
-        fewer observed entries due to segment-filtering missingness.  This is
-        defensible because one residual is computed per sample regardless, but
-        it means BIC may slightly favour phenotype windows with higher average
-        variant coverage.
-        """
-        if rss <= 0.0 or n <= 0:
-            return np.inf
-        k = n_nonzero + n_unpen
-        return n * np.log(rss / n) + k * np.log(n)
-
-    def fit_path_bic(
+    def fit_path_cv(
         self,
         y: np.ndarray,
         d_std: np.ndarray,
         obs_masks: List[np.ndarray],
         X_unpen: np.ndarray,
-        n_lambda: int = 100,
+        n_lambda: int = 30,
         lambda_ratio: float = 0.01,
-        refit_gamma: float = 0.1,
+        n_folds: int = 5,
+        cv_tau: float = 0.8,
+        seed: int = 42,
     ) -> Tuple[np.ndarray, np.ndarray, float, np.ndarray, np.ndarray, np.ndarray]:
-        """Fit Elastic Net along a warm-started lambda path; select lambda by
-        relaxed-refit BIC.
+        """
+        Select lambda via K-fold CV with range-based tolerance.
 
-        At each lambda the active set (non-zero EN coefficients) is
-        identified, those variables are refitted with a *relaxed* pure-Ridge
-        penalty ``gamma * lambda`` (alpha_en=0) to obtain a nearly-unbiased
-        RSS while keeping the system well-conditioned.  BIC is computed on
-        the relaxed-refit model.  This corrects the downward bias of
-        penalised-path BIC caused by coefficient shrinkage (cf. Meinshausen
-        2007, relaxed Lasso) without requiring a fully unpenalised OLS that
-        can be singular when the active set is large relative to n.
+        A log-spaced grid of lambdas is evaluated by K-fold CV. The selected
+        lambda is the largest (most regularised) whose mean CV error is within
+        cv_tau of the improvement range over the null model:
+        threshold = CV_min + cv_tau * (CV_null - CV_min).
+        If no lambda improves over the null, the null model is returned
+        (zero hits).
 
-        The active set is capped at ``n // 3`` variants (top-K by |beta|)
-        to prevent near-saturated refits.
+        Parameters:
+        - n_lambda: number of lambda grid points (log-spaced).
+        - lambda_ratio: lam_min / lam_max.
+        - n_folds: number of CV folds (default 5).
+        - cv_tau: fraction of improvement over null that may be sacrificed
+          for sparsity (default 0.8).
+        - seed: random seed for fold assignment.
 
-        Parameters
-        ----------
-        n_lambda     : number of lambda grid points.
-        lambda_ratio : lam_min / lam_max.
-        refit_gamma  : relaxation factor for refit penalty.  The active-set
-                       refit uses ``gamma * lambda`` with alpha_en=0 (pure
-                       Ridge).  Default 0.1 removes ~90 % of shrinkage
-                       while providing robust stabilisation.
-
-        Returns
-        -------
-        best_beta, best_theta, best_lambda, bic_path, lambda_path, best_beta_refit
+        Returns:
+        - best_beta, best_theta, best_lambda, mean_cv_errors, lambdas,
+          best_beta_refit
         """
         lam_max = self.compute_lambda_max(y, d_std, obs_masks, X_unpen)
         if lam_max <= 0:
             lam_max = 1.0
-
         lam_min = lam_max * lambda_ratio
-        lambda_path = np.exp(np.linspace(np.log(lam_max), np.log(lam_min), n_lambda))
 
         n = len(y)
-        q = X_unpen.shape[1]
         p = d_std.shape[0]
 
-        # Maximum active-set size for a reliable refit (avoid near-saturated systems).
-        # Subtract q (unpenalised covariates) so the refit system
-        # (q + top_k parameters) does not approach saturation.
-        max_active_refit = max(1, (n - q) // 3)
+        # Log-spaced grid: large (sparse) → small (dense)
+        lambdas = np.geomspace(lam_max, lam_min, max(n_lambda, 2))
 
-        best_bic = np.inf
-        best_beta = np.zeros(p)
-        best_theta = self._ols(y, X_unpen)
-        best_lambda = lambda_path[0]
-        best_beta_refit = np.zeros(p)
-        bic_path = np.full(n_lambda, np.inf)
+        # Assign folds
+        rng = np.random.default_rng(seed)
+        fold_ids = np.empty(n, dtype=int)
+        perm = rng.permutation(n)
+        for i, idx in enumerate(perm):
+            fold_ids[idx] = i % n_folds
 
-        # Warm-start containers
-        beta_ws: Optional[np.ndarray] = None
-        theta_ws: Optional[np.ndarray] = None
+        cv_errors = np.zeros((len(lambdas), n_folds))
 
-        for i, lam in enumerate(lambda_path):
-            beta, theta, r, _ = self.fit(
-                y,
-                d_std,
-                obs_masks,
-                X_unpen,
-                lam,
-                beta_init=beta_ws,
-                theta_init=theta_ws,
-            )
+        for fold in range(n_folds):
+            train_idx = np.where(fold_ids != fold)[0]
+            test_idx = np.where(fold_ids == fold)[0]
+            if len(test_idx) == 0 or len(train_idx) == 0:
+                continue
 
-            active = np.flatnonzero(np.abs(beta) > 1e-10)
-            n_nz = len(active)
+            y_train = y[train_idx]
+            X_train = X_unpen[train_idx]
+            d_train = d_std[:, train_idx]
 
-            # Relaxed-refit BIC: refit active set with gamma * lam
-            lam_refit = refit_gamma * lam
-            refit_failed = False  # track convergence for BIC fallback
+            # Remap obs_masks to training-local indices
+            train_bool = np.zeros(n, dtype=bool)
+            train_bool[train_idx] = True
+            old_to_train = np.full(n, -1, dtype=np.intp)
+            old_to_train[train_idx] = np.arange(len(train_idx))
 
-            if 0 < n_nz <= max_active_refit:
-                d_active = d_std[active]
-                obs_active = [obs_masks[v] for v in active]
-                # Pure Ridge (alpha_en=0) for the refit: all of lam_refit
-                # goes to the L2 term, maximising stabilisation.
-                # Tolerance 1e-5 is sufficient for RSS/BIC; tighter values
-                # stall due to the alternating theta-refit perturbation.
-                refit_en = MissingAwareElasticNet(alpha_en=0.0, max_iter=5000, tol=1e-5)
-                beta_rf, theta_rf, r_rf, n_iter_rf = refit_en.fit(
-                    y,
-                    d_active,
-                    obs_active,
-                    X_unpen,
-                    lam=lam_refit,
-                    beta_init=beta[active],
-                    theta_init=theta,
+            obs_masks_train: List[np.ndarray] = []
+            for v_mask in obs_masks:
+                in_train = train_bool[v_mask]
+                obs_masks_train.append(old_to_train[v_mask[in_train]])
+
+            # Precompute test mapping for prediction
+            old_to_test = np.full(n, -1, dtype=np.intp)
+            old_to_test[test_idx] = np.arange(len(test_idx))
+            test_bool = np.zeros(n, dtype=bool)
+            test_bool[test_idx] = True
+
+            # Warm-start along the lambda path
+            beta_ws: Optional[np.ndarray] = None
+            theta_ws: Optional[np.ndarray] = None
+
+            for li, lam in enumerate(lambdas):
+                beta, theta, _, _ = self.fit(
+                    y_train,
+                    d_train,
+                    obs_masks_train,
+                    X_train,
+                    lam,
+                    beta_init=beta_ws,
+                    theta_init=theta_ws,
                 )
-                if n_iter_rf == 5000:
-                    warnings.warn(
-                        f"Refit at lambda={lam:.4f} (active={n_nz}) "
-                        f"did not converge in {n_iter_rf} iterations.",
-                        RuntimeWarning,
-                        stacklevel=2,
-                    )
-                    refit_failed = True
-                rss = float(np.dot(r_rf, r_rf))
-                n_bic_params = n_nz  # all active vars were refitted
-            elif n_nz > max_active_refit:
-                # Too many active variables for full refit.
-                # Refit only the top-K variants by |beta|.
-                top_k = max_active_refit
-                top_idx = active[np.argsort(-np.abs(beta[active]))[:top_k]]
-                d_top = d_std[top_idx]
-                obs_top = [obs_masks[v] for v in top_idx]
-                refit_en = MissingAwareElasticNet(alpha_en=0.0, max_iter=5000, tol=1e-5)
-                beta_rf_top, _, r_rf, n_iter_rf = refit_en.fit(
-                    y,
-                    d_top,
-                    obs_top,
-                    X_unpen,
-                    lam=lam_refit,
-                    beta_init=beta[top_idx],
-                    theta_init=theta,
-                )
-                if n_iter_rf == 5000:
-                    warnings.warn(
-                        f"Refit at lambda={lam:.4f} (top-{top_k} of {n_nz}) "
-                        f"did not converge in {n_iter_rf} iterations.",
-                        RuntimeWarning,
-                        stacklevel=2,
-                    )
-                    refit_failed = True
-                rss = float(np.dot(r_rf, r_rf))
-                # BIC penalty matches the *refit* model size, not the
-                # full EN active size, since RSS comes from the top-K refit.
-                n_bic_params = top_k
-                # Build full-p refitted beta using global indices (safe
-                # against active-local / global index mix-ups).
-                beta_rf_full = np.zeros(p)
-                beta_rf_full[top_idx] = beta_rf_top
-                beta_rf = beta_rf_full[active]
-            else:
-                rss = float(np.dot(r, r))
-                beta_rf = None
-                n_bic_params = 0
+                beta_ws = beta
+                theta_ws = theta
 
-            # If refit did not converge, do not trust its RSS for BIC
-            if refit_failed:
-                bic = np.inf
-            else:
-                bic = self.compute_bic(n, rss, n_bic_params, q)
-            bic_path[i] = bic
+                # Predict on test fold
+                pred = X_unpen[test_idx] @ theta
+                for v in range(p):
+                    if beta[v] != 0.0:
+                        obs_in_test = obs_masks[v][test_bool[obs_masks[v]]]
+                        if len(obs_in_test) > 0:
+                            pred[old_to_test[obs_in_test]] += (
+                                beta[v] * d_std[v, obs_in_test]
+                            )
 
-            if bic < best_bic:
-                best_bic = bic
-                best_beta = beta.copy()
-                best_theta = theta.copy()
-                best_lambda = lam
-                # Build full-length refitted beta vector
-                if beta_rf is not None:
-                    best_beta_refit = np.zeros(p)
-                    best_beta_refit[active] = beta_rf
-                else:
-                    best_beta_refit = beta.copy()
+                cv_errors[li, fold] = float(np.mean((y[test_idx] - pred) ** 2))
 
-            # Warm start for next lambda
-            beta_ws = beta
-            theta_ws = theta
+        # Range-based tolerance + null-model fallback
+        mean_cv = cv_errors.mean(axis=1)
+
+        # Null-model MSE = first grid point (lam_max, all betas zero)
+        cv_null = mean_cv[0]
+        idx_min = int(np.argmin(mean_cv))
+        cv_min = mean_cv[idx_min]
+
+        # If best CV is not better than null, return null (zero hits)
+        if cv_min >= cv_null:
+            best_lam = float(lambdas[0])
+        else:
+            threshold = cv_min + cv_tau * (cv_null - cv_min)
+            # Largest lambda (= smallest index) with CV error ≤ threshold
+            idx_sel = idx_min
+            for i in range(len(lambdas)):
+                if mean_cv[i] <= threshold:
+                    idx_sel = i
+                    break
+            best_lam = float(lambdas[idx_sel])
+
+        # Final refit on all data
+        best_beta, best_theta, _, _ = self.fit(
+            y,
+            d_std,
+            obs_masks,
+            X_unpen,
+            best_lam,
+        )
 
         return (
             best_beta,
             best_theta,
-            best_lambda,
-            bic_path,
-            lambda_path,
-            best_beta_refit,
+            best_lam,
+            mean_cv,
+            lambdas,
+            best_beta.copy(),
         )
-
-
-# ---------------------------------------------------------------------------
-#  Variant standardisation with per-variant observed-only statistics
-# ---------------------------------------------------------------------------
-
-
-def standardize_variants(
-    d_raw: np.ndarray,
-    coverage_tau: float,
-    n_total: int,
-    min_obs: int = 30,
-) -> Tuple[np.ndarray, List[np.ndarray], np.ndarray, np.ndarray]:
-    """Standardise each variant predictor d_v on its observed entries.
-
-    Applies a coverage filter: only variants with at least
-    ``max(min_obs, coverage_tau * n_total)`` observed samples are kept.
-
-    Parameters
-    ----------
-    d_raw        : (p, n) allelic difference d = REFlr - ALTlr, NaN where missing.
-    coverage_tau : minimum fraction of n_total required for a variant to be kept.
-    n_total      : total number of samples (for coverage filter).
-    min_obs      : hard minimum observation count.
-
-    Returns
-    -------
-    d_std     : (p_kept, n) standardised, NaN where missing.
-    obs_masks : list of ndarray -- observed sample indices per kept variant.
-    keep_idx  : (p_kept,) original row indices that were retained.
-    sd_vec    : (p_kept,) per-variant SD used for standardisation (for
-                back-transforming coefficients to raw units).
-    """
-    p, n = d_raw.shape
-    min_required = max(min_obs, int(coverage_tau * n_total))
-
-    d_std_rows: List[np.ndarray] = []
-    obs_masks: List[np.ndarray] = []
-    keep: List[int] = []
-    sd_list: List[float] = []
-
-    for v in range(p):
-        idx = np.flatnonzero(~np.isnan(d_raw[v]))
-        if len(idx) < min_required:
-            continue
-
-        vals = d_raw[v, idx]
-        mu = np.mean(vals)
-        sd = np.std(vals)
-
-        if sd < 1e-10:
-            continue
-
-        row = np.full(n, np.nan)
-        row[idx] = (vals - mu) / sd
-
-        d_std_rows.append(row)
-        obs_masks.append(idx)
-        keep.append(v)
-        sd_list.append(float(sd))
-
-    keep_idx = np.array(keep, dtype=int)
-    sd_vec = np.array(sd_list, dtype=float)
-    if len(keep) == 0:
-        d_std = np.empty((0, n))
-    else:
-        d_std = np.vstack(d_std_rows)
-
-    return d_std, obs_masks, keep_idx, sd_vec
-
-
-def standardize_variants_bootstrap(
-    d_raw: np.ndarray,
-    min_obs_boot: int = 20,
-) -> Tuple[np.ndarray, List[np.ndarray], np.ndarray]:
-    """Standardise variants for a bootstrap subsample *without* coverage filtering.
-
-    Unlike :func:`standardize_variants`, this function does **not** apply the
-    ``coverage_tau`` threshold.  It only drops a variant if the subsample has
-    fewer than ``min_obs_boot`` observed entries or zero variance.  This ensures
-    that the stability-selection frequency pi_v reflects "selected when fit is
-    attempted", not "selected AND passed a second coverage filter".
-
-    Parameters
-    ----------
-    d_raw         : (p, n_sub) raw d values for the subsample, NaN = missing.
-    min_obs_boot  : hard minimum of observed entries per variant.
-
-    Returns
-    -------
-    d_std     : (p_kept, n_sub) standardised, NaN where missing.
-    obs_masks : list of ndarray -- observed indices per kept variant.
-    keep_idx  : (p_kept,) original row indices that were retained.
-    """
-    p, n = d_raw.shape
-
-    d_std_rows: List[np.ndarray] = []
-    obs_masks: List[np.ndarray] = []
-    keep: List[int] = []
-
-    for v in range(p):
-        idx = np.flatnonzero(~np.isnan(d_raw[v]))
-        if len(idx) < min_obs_boot:
-            continue
-
-        vals = d_raw[v, idx]
-        mu = np.mean(vals)
-        sd = np.std(vals)
-
-        if sd < 1e-10:
-            continue
-
-        row = np.full(n, np.nan)
-        row[idx] = (vals - mu) / sd
-
-        d_std_rows.append(row)
-        obs_masks.append(idx)
-        keep.append(v)
-
-    keep_idx = np.array(keep, dtype=int)
-    if len(keep) == 0:
-        d_std = np.empty((0, n))
-    else:
-        d_std = np.vstack(d_std_rows)
-
-    return d_std, obs_masks, keep_idx
-
-
-# ---------------------------------------------------------------------------
-#  LD computation & clustering
-# ---------------------------------------------------------------------------
-
-
-def compute_ld_matrix(d_std: np.ndarray, obs_masks: List[np.ndarray]) -> np.ndarray:
-    """Pairwise r-squared matrix using overlap samples per pair.
-
-    Uses boolean masks and vectorised overlap computation to avoid
-    expensive Python-level set operations per pair.
-
-    Parameters
-    ----------
-    d_std     : (p, n) standardised predictors (NaN where missing).
-    obs_masks : list of observed-sample index arrays (sorted, unique).
-
-    Returns
-    -------
-    r2 : (p, p) symmetric matrix.
-    """
-    p, n = d_std.shape
-    r2 = np.eye(p)
-
-    if p <= 1:
-        return r2
-
-    # Pre-build boolean observation masks (p x n) for fast overlap
-    obs_bool = np.zeros((p, n), dtype=bool)
-    for v in range(p):
-        obs_bool[v, obs_masks[v]] = True
-
-    for v in range(p):
-        for w in range(v + 1, p):
-            overlap_mask = obs_bool[v] & obs_bool[w]
-            n_overlap = int(overlap_mask.sum())
-            if n_overlap < 5:
-                r2[v, w] = r2[w, v] = 0.0
-                continue
-            dv = d_std[v, overlap_mask]
-            dw = d_std[w, overlap_mask]
-            # Fast correlation via dot products
-            dv_c = dv - dv.mean()
-            dw_c = dw - dw.mean()
-            ss_vw = np.dot(dv_c, dw_c)
-            ss_vv = np.dot(dv_c, dv_c)
-            ss_ww = np.dot(dw_c, dw_c)
-            denom = ss_vv * ss_ww
-            if denom > 0:
-                c = ss_vw / np.sqrt(denom)
-                r2[v, w] = r2[w, v] = c * c
-            else:
-                r2[v, w] = r2[w, v] = 0.0
-
-    return r2
-
-
-def ld_cluster_variants(
-    r2: np.ndarray,
-    stability_scores: np.ndarray,
-    ld_threshold: float = 0.8,
-) -> Tuple[np.ndarray, np.ndarray, Dict[int, float]]:
-    """Hierarchical clustering on 1 - r-squared distance.
-
-    Returns
-    -------
-    cluster_ids       : (p,) integer cluster labels (1-based).
-    lead_mask         : (p,) boolean -- True for lead variant per cluster.
-    cluster_stability : dict cluster_id -> max stability score in cluster.
-    """
-    p = r2.shape[0]
-    if p == 0:
-        return np.array([], dtype=int), np.array([], dtype=bool), {}
-
-    if p == 1:
-        return (
-            np.ones(1, dtype=int),
-            np.ones(1, dtype=bool),
-            {1: float(stability_scores[0])},
-        )
-
-    dist = np.clip(1.0 - r2, 0.0, 1.0)
-    np.fill_diagonal(dist, 0.0)
-    condensed = squareform(dist, checks=False)
-    Z = linkage(condensed, method="average")
-    cluster_ids = fcluster(Z, t=1.0 - ld_threshold, criterion="distance")
-
-    lead_mask = np.zeros(p, dtype=bool)
-    cluster_stability: Dict[int, float] = {}
-
-    for cid in np.unique(cluster_ids):
-        members = np.flatnonzero(cluster_ids == cid)
-        best = members[np.argmax(stability_scores[members])]
-        lead_mask[best] = True
-        cluster_stability[int(cid)] = float(np.max(stability_scores[members]))
-
-    return cluster_ids, lead_mask, cluster_stability
-
-
-# ---------------------------------------------------------------------------
-#  Finemapping orchestrator
-# ---------------------------------------------------------------------------
 
 
 class Finemapping:
-    """SegmentQTL finemapping: segment-aware missing Elastic Net + stability
+    """
+    SegmentQTL finemapping: segment-aware missing Elastic Net + stability
     selection.
 
-    Uses the same data-loading and segment-filtering logic as ``Cis`` mode,
+    Uses the same data-loading and segment-filtering logic as Cis mode,
     then fits a joint missing-aware Elastic Net model across all variants in
-    each phenotype window, with BIC for lambda selection and stability
+    each phenotype window, with cross-validated lambda selection and stability
     selection for robust identification of causal variants.
 
-    Parameters
-    ----------
-    chromosome          : Chromosome identifier (e.g. ``"chr1"``).
-    quantifications     : Path to quantifications CSV.
-    covariates          : Path to sample-level covariates CSV (optional).
-    segmentation        : Path to segmentation CSV.
-    genotype_alt        : Path to ALTlr genotype CSV for this chromosome.
-    genotype_ref        : Path to REFlr genotype CSV for this chromosome.
-    copynumber          : Path to phenotype-level copy-number covariate CSV
-                          (optional).  This is CNlr -- included as an
-                          *unpenalised* predictor in the Elastic Net.
-    phenotype_covariate : Path to additional phenotype-level covariate CSV
-                          (optional; also unpenalised).
-    window              : Cis-window size in bp.
-    num_cores           : Number of parallel workers.
-    alpha_en            : Elastic Net mixing (1 = Lasso, 0 = Ridge).
-    coverage_tau        : Minimum fraction of samples observed for a variant
-                          to be retained.
-    n_bootstrap         : Number of stability-selection resamples.
-    subsample_frac      : Fraction of samples per resample.
-    stability_threshold : Threshold on selection probability pi_v for the
-                          ``is_stable`` flag.
-    n_lambda            : Lambda-grid size for BIC path.
-    lambda_ratio        : lam_min / lam_max ratio for the grid.
-    ld_threshold        : r-squared threshold for LD clustering.
-    min_obs_boot        : Hard minimum observed entries per variant inside
-                          each bootstrap subsample.  Variants with fewer
-                          observations are skipped for that resample.
+    Parameters:
+    - chromosome: Chromosome identifier (e.g. "chr1").
+    - quantifications: Path to quantifications CSV.
+    - covariates: Path to sample-level covariates CSV (optional).
+    - segmentation: Path to segmentation CSV.
+    - genotype_alt: Path to ALTlr genotype CSV for this chromosome.
+    - genotype_ref: Path to REFlr genotype CSV for this chromosome.
+    - copynumber: Path to phenotype-level copy-number covariate CSV
+      (optional). This is CNlr -- included as an unpenalised predictor
+      in the Elastic Net.
+    - phenotype_covariate: Path to additional phenotype-level covariate CSV
+      (optional; also unpenalised).
+    - window: Cis-window size in bp.
+    - num_cores: Number of parallel workers.
+    - alpha_en: Elastic Net mixing (1 = Lasso, 0 = Ridge).
+    - coverage_tau: Minimum fraction of samples observed for a variant
+      to be retained.
+    - n_bootstrap: Number of stability-selection resamples.
+    - subsample_frac: Fraction of samples per resample.
+    - stability_threshold: Threshold on selection probability pi_v for the
+      is_stable flag.
+    - n_lambda: Number of lambda grid points for CV-based selection.
+    - lambda_ratio: lam_min / lam_max ratio for the grid.
+    - cv_tau: Range-based tolerance for lambda selection
+      (default 0.8 = sacrifice up to 80% of improvement over null for
+      sparsity).
+    - min_obs_boot: Hard minimum observed entries per variant inside
+      each bootstrap subsample. Variants with fewer observations are
+      skipped for that resample.
     """
 
     def __init__(
@@ -694,29 +392,29 @@ class Finemapping:
         n_bootstrap: int = 200,
         subsample_frac: float = 0.8,
         stability_threshold: float = 0.6,
-        n_lambda: int = 100,
+        n_lambda: int = 30,
         lambda_ratio: float = 0.01,
-        ld_threshold: float = 0.8,
+        cv_tau: float = 0.8,
         min_obs_boot: int = 20,
     ):
         self.chromosome = chromosome
 
-        # ── phenotype data ──
+        # Load phenotype data
         self.full_quan = self._load(quantifications, index_col=3)
         self.quan = self.full_quan[self.full_quan["chr"] == self.chromosome]
         self.samples = self.quan.columns.to_numpy()[3:]
 
-        # ── sample-level covariates ──
+        # Load sample-level covariates (optional)
         self.cov = self._load(covariates, index_col=None) if covariates else None
 
-        # ── segmentation ──
+        # Load segmentation
         self.segmentation = self._load(segmentation, index_col=0)
         self.segmentation = self.segmentation[self.segmentation.chr == self.chromosome]
         self.segmentation = self.segmentation[
             self.segmentation.index.isin(self.samples)
         ]
 
-        # ── genotypes ──
+        # Load genotypes
         self.geno_alt = self._load(genotype_alt, index_col=0)
         self.geno_alt = self.geno_alt.loc[:, self.geno_alt.columns.isin(self.samples)][
             self.samples
@@ -736,21 +434,21 @@ class Finemapping:
             (int(s.split(":")[1]) for s in idx_arr), dtype=np.int64
         )
 
-        # ── phenotype-level copy-number covariate (CNlr) ──
+        # Load phenotype-level copy-number covariate (CNlr, optional)
         self.copynumber_df = self._load(copynumber, index_col=0) if copynumber else None
 
-        # ── phenotype-level covariate (optional, additional unpenalised) ──
+        # Load phenotype-level covariate (optional, additional unpenalised)
         self.phenotype_covariate_df = (
             self._load(phenotype_covariate, index_col=0)
             if phenotype_covariate
             else None
         )
 
-        # ── window & parallelism ──
+        # Window & parallelism
         self.window = window
         self.num_cores = num_cores
 
-        # ── EN hyper-parameters ──
+        # EN hyper-parameters
         self.alpha_en = alpha_en
         self.coverage_tau = coverage_tau
         self.n_bootstrap = n_bootstrap
@@ -758,13 +456,14 @@ class Finemapping:
         self.stability_threshold = stability_threshold
         self.n_lambda = n_lambda
         self.lambda_ratio = lambda_ratio
-        self.ld_threshold = ld_threshold
+        self.cv_tau = cv_tau
         self.min_obs_boot = min_obs_boot
 
-    # ---- I/O (mirrors Cis) -----------------------------------------------
+        self.bootstrap_nonzero_diagnostics = pd.DataFrame(
+            columns=["phenotype", "variant", "bootstrap_iteration", "beta_full"]
+        )
 
-    @staticmethod
-    def _load(fp: str, index_col) -> pd.DataFrame:
+    def _load(self, fp: str, index_col) -> pd.DataFrame:
         if not path.exists(fp):
             raise FileNotFoundError(f"File '{fp}' not found.")
         df = pd.read_csv(fp, index_col=index_col)
@@ -772,22 +471,19 @@ class Finemapping:
             raise ValueError(f"File '{fp}' has no rows.")
         return df
 
-    # ---- window / segment helpers (identical to Cis) ----------------------
-
     def _phenotype_window(self, pheno_index: int) -> Tuple[int, int]:
-        """Cis-window boundaries for phenotype at *pheno_index*."""
-        start = self.quan["start"].iloc[pheno_index] - self.window
-        end = self.quan["end"].iloc[pheno_index] + self.window
-        return start, end
+        """Cis-window boundaries for phenotype at pheno_index."""
+        return phenotype_window_bounds(self.quan, pheno_index, self.window)
 
     def _variants_in_window(
         self, start: int, end: int
     ) -> Tuple[pd.DataFrame, pd.DataFrame, np.ndarray]:
-        mask = (self.variant_positions >= start) & (self.variant_positions <= end)
-        return (
-            self.geno_alt.loc[mask],
-            self.geno_ref.loc[mask],
-            self.variant_positions[mask],
+        return variants_in_window(
+            self.geno_alt,
+            self.geno_ref,
+            self.variant_positions,
+            start,
+            end,
         )
 
     def _segment_filter(
@@ -798,70 +494,34 @@ class Finemapping:
         variants_ref: pd.DataFrame,
         variant_pos: np.ndarray,
     ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Segment-consistency filter identical to ``Cis.gene_variants_common_segment``.
-
-        Masks genotype entries to NaN when the phenotype and variant do not sit
-        on the same segment for a given sample.
         """
-        pheno_start = start + self.window
-        pheno_end = end - self.window
+        Segment-consistency filter identical to Cis.gene_variants_common_segment.
 
-        alt_arr = variants_alt.to_numpy(dtype=float, copy=True)
-        ref_arr = variants_ref.to_numpy(dtype=float, copy=True)
-        sample_cols = variants_alt.columns.to_numpy()
-
-        seg_index = self.segmentation.index.to_numpy()
-        seg_startpos = self.segmentation["startpos"].to_numpy()
-        seg_endpos = self.segmentation["endpos"].to_numpy()
-
-        for col_idx, cur_sample in enumerate(sample_cols):
-            seg_mask = (
-                (seg_index == cur_sample)
-                & (seg_startpos <= pheno_start)
-                & (seg_endpos >= pheno_start)
-            )
-            seg_indices = np.flatnonzero(seg_mask)
-
-            if len(seg_indices) != 1:
-                alt_arr[:, col_idx] = np.nan
-                ref_arr[:, col_idx] = np.nan
-                continue
-
-            seg_idx = seg_indices[0]
-            lb = seg_startpos[seg_idx]
-            ub = seg_endpos[seg_idx]
-
-            if not (lb <= pheno_end <= ub):
-                alt_arr[:, col_idx] = np.nan
-                ref_arr[:, col_idx] = np.nan
-                continue
-
-            outside = (variant_pos < lb) | (variant_pos > ub)
-            alt_arr[outside, col_idx] = np.nan
-            ref_arr[outside, col_idx] = np.nan
-
-        variants_alt = pd.DataFrame(
-            alt_arr, index=variants_alt.index, columns=sample_cols
+        Masks genotype entries to NaN when the phenotype and variant do not
+        sit on the same segment for a given sample.
+        """
+        return filter_variants_to_common_segment(
+            self.segmentation,
+            self.window,
+            start,
+            end,
+            variants_alt,
+            variants_ref,
+            variant_pos,
         )
-        variants_ref = pd.DataFrame(
-            ref_arr, index=variants_ref.index, columns=sample_cols
-        )
-        return variants_alt, variants_ref
-
-    # ---- data preparation for one phenotype ------------------------------
 
     def _prepare_phenotype(self, pheno_index: int) -> Optional[dict]:
-        """Build the d-matrix, phenotype vector, and unpenalised design for
+        """
+        Build the d-matrix, phenotype vector, and unpenalised design for
         one phenotype.
 
-        Returns ``None`` when the phenotype cannot be finemapped (too few
-        data).  Otherwise returns a dict with keys:
-
-        * ``variant_ids`` -- (p_window,) variant identifiers
-        * ``d_raw``       -- (p_window, n_good) raw d values (NaN = missing)
-        * ``y``           -- (n_good,) centred phenotype
-        * ``X_unpen``     -- (n_good, q) unpenalised design (intercept + covs)
-        * ``n_samples``   -- int
+        Returns None when the phenotype cannot be finemapped (too few
+        data). Otherwise returns a dict with keys:
+        - variant_ids: (p_window,) variant identifiers
+        - d_raw: (p_window, n_good) raw d values (NaN = missing)
+        - y: (n_good,) centred phenotype
+        - X_unpen: (n_good, q) unpenalised design (intercept + covs)
+        - n_samples: int
         """
         current_pheno = self.quan.index[pheno_index]
 
@@ -971,39 +631,40 @@ class Finemapping:
             "n_samples": n_good,
         }
 
-    # ---- stability selection ---------------------------------------------
-
     def _stability_selection(
         self,
+        phenotype: str,
+        kept_ids: np.ndarray,
         y: np.ndarray,
         d_raw_kept: np.ndarray,
         X_unpen: np.ndarray,
-        lam_bic: float,
+        lam_selected: float,
         rng: np.random.Generator,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Bootstrap stability selection at a fixed lambda.
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[Dict[str, object]]]:
+        """
+        Bootstrap stability selection at a fixed lambda.
 
         Variant predictors are re-standardised inside each subsample (observed
-        entries only) but the variant set is **frozen** from the full-data
-        coverage filter.  Bootstrap subsamples only skip a variant when it has
-        too few observed entries (< ``min_obs_boot``) or zero variance, so that
+        entries only) but the variant set is frozen from the full-data
+        coverage filter. Bootstrap subsamples only skip a variant when it has
+        too few observed entries (< min_obs_boot) or zero variance, so that
         pi_v reflects "selected when fit is attempted", not "selected AND
         passed a second coverage filter".
 
-        Parameters
-        ----------
-        y           : (n,) centred phenotype.
-        d_raw_kept  : (p_kept, n) raw d values for kept variants, NaN = missing.
-        X_unpen     : (n, q) unpenalised design.
-        lam_bic     : penalty selected on full data.
-        rng         : random generator (seeded per phenotype).
+        Parameters:
+        - y: (n,) centred phenotype.
+        - d_raw_kept: (p_kept, n) raw d values for kept variants, NaN = missing.
+        - X_unpen: (n, q) unpenalised design.
+        - lam_selected: penalty selected on full data.
+        - rng: random generator (seeded per phenotype).
 
-        Returns
-        -------
-        pi_v          : (p_kept,) selection probability (fraction of bootstraps
-                        where beta_v != 0).
-        mean_beta     : (p_kept,) mean beta among selections (standardised units).
-        sign_consist  : (p_kept,) fraction of selections with beta > 0.
+        Returns:
+        - pi_v: (p_kept,) selection probability (fraction of bootstraps
+          where beta_v != 0).
+        - mean_beta: (p_kept,) mean beta among selections (standardised units).
+        - sign_consist: (p_kept,) fraction of selections with beta > 0.
+        - bootstrap_nonzero_rows: list of diagnostic records for each
+          bootstrap/variant pair where beta_full != 0.
         """
         n = len(y)
         p_kept = d_raw_kept.shape[0]
@@ -1013,10 +674,11 @@ class Finemapping:
         beta_sum = np.zeros(p_kept)
         pos_count = np.zeros(p_kept)
         n_effective_boot = 0
+        bootstrap_nonzero_rows: List[Dict[str, object]] = []
 
         en = MissingAwareElasticNet(alpha_en=self.alpha_en, max_iter=500, tol=1e-5)
 
-        for _ in range(self.n_bootstrap):
+        for boot_idx in range(self.n_bootstrap):
             sub = np.sort(rng.choice(n, n_sub, replace=False))
             y_sub = y[sub]
             X_sub = X_unpen[sub]
@@ -1030,7 +692,7 @@ class Finemapping:
                 continue
 
             n_effective_boot += 1
-            beta, _, _, _ = en.fit(y_sub, d_sub, obs_sub, X_sub, lam_bic)
+            beta, _, _, _ = en.fit(y_sub, d_sub, obs_sub, X_sub, lam_selected)
 
             for j, orig_v in enumerate(keep_inner):
                 if abs(beta[j]) > 1e-10:
@@ -1038,15 +700,21 @@ class Finemapping:
                     beta_sum[orig_v] += beta[j]
                     if beta[j] > 0:
                         pos_count[orig_v] += 1
+                    bootstrap_nonzero_rows.append(
+                        {
+                            "phenotype": phenotype,
+                            "variant": kept_ids[orig_v],
+                            "bootstrap_iteration": boot_idx + 1,
+                            "beta_full": float(beta[j]),
+                        }
+                    )
 
         pi_v = sel_count / max(n_effective_boot, 1)
         with np.errstate(invalid="ignore"):
             mean_beta = np.where(sel_count > 0, beta_sum / sel_count, 0.0)
             sign_consist = np.where(sel_count > 0, pos_count / sel_count, np.nan)
 
-        return pi_v, mean_beta, sign_consist
-
-    # ---- per-phenotype processing ----------------------------------------
+        return pi_v, mean_beta, sign_consist, bootstrap_nonzero_rows
 
     def _empty_result(self, phenotype: str, n_samples: int = 0) -> pd.DataFrame:
         return pd.DataFrame(
@@ -1062,9 +730,7 @@ class Finemapping:
                     "is_stable": False,
                     "mean_beta": np.nan,
                     "sign_consistency": np.nan,
-                    "ld_cluster": np.nan,
-                    "is_lead": False,
-                    "cluster_stability": np.nan,
+                    "lambda_selected": np.nan,
                     "lambda_bic": np.nan,
                     "beta_full": np.nan,
                     "beta_full_raw": np.nan,
@@ -1072,12 +738,19 @@ class Finemapping:
             ]
         )
 
-    def _process_phenotype(self, pheno_index: int) -> pd.DataFrame:
+    def _empty_bootstrap_diagnostics(self) -> pd.DataFrame:
+        return pd.DataFrame(
+            columns=["phenotype", "variant", "bootstrap_iteration", "beta_full"]
+        )
+
+    def _process_phenotype(self, pheno_index: int) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Full finemapping pipeline for one phenotype."""
         current_pheno = self.quan.index[pheno_index]
         data = self._prepare_phenotype(pheno_index)
         if data is None:
-            return self._empty_result(current_pheno)
+            return self._empty_result(
+                current_pheno
+            ), self._empty_bootstrap_diagnostics()
 
         variant_ids = data["variant_ids"]
         d_raw = data["d_raw"]
@@ -1085,12 +758,14 @@ class Finemapping:
         X_unpen = data["X_unpen"]
         n_samples = data["n_samples"]
 
-        # --- standardise & coverage filter (full data) ---
+        # Standardise & coverage filter (full data)
         d_std, obs_masks, keep_idx, sd_vec = standardize_variants(
             d_raw, self.coverage_tau, n_samples
         )
         if len(keep_idx) == 0:
-            return self._empty_result(current_pheno, n_samples)
+            return self._empty_result(
+                current_pheno, n_samples
+            ), self._empty_bootstrap_diagnostics()
 
         kept_ids = variant_ids[keep_idx]
         p_kept = len(kept_ids)
@@ -1098,41 +773,38 @@ class Finemapping:
         # Compute median n_obs across kept variants for diagnostics
         median_n_obs = float(np.median([len(m) for m in obs_masks]))
 
-        # --- BIC lambda-path on full data ---
+        # CV-based lambda selection on full data
         en = MissingAwareElasticNet(alpha_en=self.alpha_en)
-        best_beta, best_theta, lam_bic, _, _, best_beta_refit = en.fit_path_bic(
+        best_beta, best_theta, lam_selected, _, _, best_beta_refit = en.fit_path_cv(
             y,
             d_std,
             obs_masks,
             X_unpen,
             n_lambda=self.n_lambda,
             lambda_ratio=self.lambda_ratio,
+            cv_tau=self.cv_tau,
+            seed=42 + pheno_index,
         )
 
-        # --- stability selection ---
+        # Stability selection
         rng = np.random.default_rng(seed=42 + pheno_index)
         d_raw_kept = d_raw[keep_idx]
 
-        pi_v, mean_beta, sign_consist = self._stability_selection(
-            y,
-            d_raw_kept,
-            X_unpen,
-            lam_bic,
-            rng,
+        pi_v, mean_beta, sign_consist, bootstrap_nonzero_rows = (
+            self._stability_selection(
+                current_pheno,
+                kept_ids,
+                y,
+                d_raw_kept,
+                X_unpen,
+                lam_selected,
+                rng,
+            )
         )
 
-        # --- LD clustering ---
-        r2 = compute_ld_matrix(d_std, obs_masks)
-        cluster_ids, lead_mask, cluster_stab = ld_cluster_variants(
-            r2,
-            pi_v,
-            self.ld_threshold,
-        )
-
-        # --- assemble per-variant results ---
+        # Assemble per-variant results
         rows = []
         for j in range(p_kept):
-            cid = int(cluster_ids[j])
             rows.append(
                 {
                     "phenotype": current_pheno,
@@ -1149,27 +821,28 @@ class Finemapping:
                         if np.isfinite(sign_consist[j])
                         else np.nan
                     ),
-                    "ld_cluster": cid,
-                    "is_lead": bool(lead_mask[j]),
-                    "cluster_stability": cluster_stab.get(cid, 0.0),
-                    "lambda_bic": float(lam_bic),
+                    "lambda_selected": float(lam_selected),
+                    "lambda_bic": float(lam_selected),
                     "beta_full": float(best_beta_refit[j]),
                     "beta_full_raw": float(best_beta_refit[j] / sd_vec[j]),
                 }
             )
 
-        return pd.DataFrame(rows)
+        bootstrap_diag_df = pd.DataFrame(
+            bootstrap_nonzero_rows,
+            columns=["phenotype", "variant", "bootstrap_iteration", "beta_full"],
+        )
 
-    # ---- public entry point ----------------------------------------------
+        return pd.DataFrame(rows), bootstrap_diag_df
 
     def calculate_finemapping(self, phenotype_id: Optional[str] = None) -> pd.DataFrame:
-        """Run finemapping for phenotypes on this chromosome.
+        """
+        Run finemapping for phenotypes on this chromosome.
 
-        Parameters
-        ----------
-        phenotype_id : optional phenotype identifier.  If provided, only
-                       that phenotype is finemapped.  Otherwise all
-                       phenotypes on the chromosome are processed.
+        Parameters:
+        - phenotype_id: optional phenotype identifier. If provided, only
+          that phenotype is finemapped. Otherwise all phenotypes on the
+          chromosome are processed.
         """
         start = time()
 
@@ -1204,13 +877,22 @@ class Finemapping:
 
         elapsed = (time() - start) / 60
         print(f"Finemapping completed in {elapsed:.1f} min")
-        return pd.concat(results, ignore_index=True)
 
-    def _process_phenotype_safe(self, pheno_index: int) -> pd.DataFrame:
+        main_results = [res[0] for res in results]
+        diag_results = [res[1] for res in results]
+
+        self.bootstrap_nonzero_diagnostics = pd.concat(diag_results, ignore_index=True)
+        return pd.concat(main_results, ignore_index=True)
+
+    def _process_phenotype_safe(
+        self, pheno_index: int
+    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Exception-safe wrapper for multiprocessing workers."""
         try:
             return self._process_phenotype(pheno_index)
         except Exception as e:
             current_pheno = self.quan.index[pheno_index]
             print(f"[finemapping] Error for phenotype {current_pheno}: {e}")
-            return self._empty_result(current_pheno)
+            return self._empty_result(
+                current_pheno
+            ), self._empty_bootstrap_diagnostics()

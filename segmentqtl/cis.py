@@ -6,6 +6,11 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
+from segment_utils import (
+    filter_variants_to_common_segment,
+    phenotype_window_bounds,
+    variants_in_window,
+)
 from statistical_utils import (
     check_d_variance,
     fit_ols_and_test,
@@ -200,8 +205,11 @@ class Cis:
         Returns:
         - Tuple of window_start and window_end, which define the start and end positions of the window
         """
-        window_start = self.quan["start"].iloc[gene_index] - self.window
-        window_end = self.quan["end"].iloc[gene_index] + self.window
+        window_start, window_end = phenotype_window_bounds(
+            self.quan,
+            gene_index,
+            self.window,
+        )
         return [window_start, window_end]
 
     def get_variants_for_gene_window(self, current_start: int, current_end: int):
@@ -218,13 +226,13 @@ class Cis:
         - variants_ref: Subset of REF genotype dataframe that contains only those variants
             that are inside the given window
         """
-        subset_condition = (self.variant_positions >= current_start) & (
-            self.variant_positions <= current_end
+        return variants_in_window(
+            self.geno_alt,
+            self.geno_ref,
+            self.variant_positions,
+            current_start,
+            current_end,
         )
-        variants_alt = self.geno_alt.loc[subset_condition]
-        variants_ref = self.geno_ref.loc[subset_condition]
-        variant_pos = self.variant_positions[subset_condition]
-        return variants_alt, variants_ref, variant_pos
 
     # ── Negative control helpers ──────────────────────────────────────────
 
@@ -294,56 +302,15 @@ class Cis:
         Returns:
         - variants_alt, variants_ref: Filtered and masked subsets of genotype dataframes.
         """
-        gene_start = start + self.window
-        gene_end = end - self.window
-
-        alt_arr = variants_alt.to_numpy(dtype=float, copy=True)
-        ref_arr = variants_ref.to_numpy(dtype=float, copy=True)
-        sample_cols = variants_alt.columns.to_numpy()
-
-        seg_index = self.segmentation.index.to_numpy()
-        seg_startpos = self.segmentation["startpos"].to_numpy()
-        seg_endpos = self.segmentation["endpos"].to_numpy()
-
-        for col_idx, cur_sample in enumerate(sample_cols):
-            # Find segment containing gene_start for this sample
-            seg_mask = (
-                (seg_index == cur_sample)
-                & (seg_startpos <= gene_start)
-                & (seg_endpos >= gene_start)
-            )
-            seg_indices = np.flatnonzero(seg_mask)
-
-            # With valid segmentation, gene_start should fall on exactly one segment
-            if len(seg_indices) != 1:
-                alt_arr[:, col_idx] = np.nan
-                ref_arr[:, col_idx] = np.nan
-                continue
-
-            seg_idx = seg_indices[0]
-            lower_bound = seg_startpos[seg_idx]
-            upper_bound = seg_endpos[seg_idx]
-
-            # Check if gene_end also falls within the same segment
-            if not (lower_bound <= gene_end <= upper_bound):
-                alt_arr[:, col_idx] = np.nan
-                ref_arr[:, col_idx] = np.nan
-                continue
-
-            # Mask variants outside segment bounds
-            outside_bounds = (variant_pos < lower_bound) | (variant_pos > upper_bound)
-            alt_arr[outside_bounds, col_idx] = np.nan
-            ref_arr[outside_bounds, col_idx] = np.nan
-
-        # Reconstruct DataFrames from masked NumPy arrays
-        variants_alt = pd.DataFrame(
-            alt_arr, index=variants_alt.index, columns=sample_cols
+        return filter_variants_to_common_segment(
+            self.segmentation,
+            self.window,
+            start,
+            end,
+            variants_alt,
+            variants_ref,
+            variant_pos,
         )
-        variants_ref = pd.DataFrame(
-            ref_arr, index=variants_ref.index, columns=sample_cols
-        )
-
-        return variants_alt, variants_ref
 
     def gene_variant_regressions_permutations(
         self,
@@ -822,23 +789,24 @@ class Cis:
             # Guard: if no variant survived filtering, return NA result
             if best_variant == "" or data_best.empty:
                 current_gene = self.quan.index[gene_index]
-                return pd.DataFrame(
-                    [
-                        {
-                            "phenotype": current_gene,
-                            "variant": np.nan,
-                            "number_of_samples": 0,
-                            "beta_s": np.nan,
-                            "se_s": np.nan,
-                            "beta_d": np.nan,
-                            "se_d": np.nan,
-                            "t_stat_d": np.nan,
-                            "nominal_p": np.nan,
-                            "r2_alt": np.nan,
-                            "p_adj": np.nan,
-                        }
-                    ]
-                )
+                row = {
+                    "phenotype": current_gene,
+                    "variant": np.nan,
+                    "number_of_samples": 0,
+                    "beta_s": np.nan,
+                    "se_s": np.nan,
+                    "beta_d": np.nan,
+                    "se_d": np.nan,
+                    "t_stat_d": np.nan,
+                    "nominal_p": np.nan,
+                    "r2_alt": np.nan,
+                    "p_adj": np.nan,
+                }
+                if self.record_aic:
+                    row["aic_null"] = np.nan
+                    row["aic_alt"] = np.nan
+                    row["delta_aic_alt_minus_null"] = np.nan
+                return pd.DataFrame([row])
 
             association_res = self.gene_variant_regressions_permutations(
                 gene_index,
