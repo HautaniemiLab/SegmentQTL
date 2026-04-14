@@ -164,7 +164,7 @@ def check_d_variance(d_filtered: np.ndarray, eps: float = 1e-10) -> bool:
     - Boolean value showing if d has sufficient variance for testing
     """
     std_d = np.std(d_filtered)
-    return std_d >= eps
+    return bool(std_d >= eps)
 
 
 def check_grouping(
@@ -994,3 +994,35 @@ def gene_variant_regressions_permutations(
 
     actual_associations["p_adj"] = adjusted_p_value
     return actual_associations
+
+
+def ols_fit(y: np.ndarray, X: np.ndarray) -> np.ndarray:
+    """Ordinary least-squares: solve y = X @ theta."""
+    theta, *_ = np.linalg.lstsq(X, y, rcond=None)
+    return theta
+
+
+def r_squared(y: np.ndarray, y_hat: np.ndarray) -> float:
+    """Coefficient of determination (R²)."""
+    ss_res = float(np.sum((y - y_hat) ** 2))
+    ss_tot = float(np.sum((y - np.mean(y)) ** 2))
+    return np.nan if ss_tot == 0 else 1.0 - ss_res / ss_tot
+
+
+def adjusted_r_squared(r2: float, n: int, p: int) -> float:
+    """Adjusted R² (p = number of predictors excluding intercept)."""
+    return np.nan if n - p - 1 <= 0 else 1.0 - (1.0 - r2) * (n - 1) / (n - p - 1)
+
+
+def assign_peaks(positions: np.ndarray, gap: int) -> np.ndarray:
+    """Group positions into peaks; positions within ``gap`` bp are clustered."""
+    if len(positions) == 0:
+        return np.array([], dtype=int)
+    order = np.argsort(positions)
+    sorted_pos = positions[order]
+    peak_ids_sorted = np.cumsum(
+        np.concatenate([[1], (np.diff(sorted_pos) > gap).astype(int)])
+    )
+    peak_ids = np.empty_like(peak_ids_sorted)
+    peak_ids[order] = peak_ids_sorted
+    return peak_ids

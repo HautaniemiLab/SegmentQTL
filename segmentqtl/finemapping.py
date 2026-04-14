@@ -5,14 +5,20 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
-
 from segment_utils import (
     filter_variants_to_common_segment,
     phenotype_window_bounds,
     variants_in_window,
 )
-from statistical_utils import standardize_variants, standardize_variants_bootstrap
+from statistical_utils import (
+    adjusted_r_squared,
+    assign_peaks,
+    ols_fit,
+    r_squared,
+    standardize_variants,
+    standardize_variants_bootstrap,
+)
+from tqdm import tqdm
 
 
 class MissingAwareElasticNet:
@@ -226,7 +232,7 @@ class MissingAwareElasticNet:
         n = len(y)
         p = d_std.shape[0]
 
-        # Log-spaced grid: large (sparse) → small (dense)
+        # Log-spaced grid: large (sparse) to small (dense)
         lambdas = np.geomspace(lam_max, lam_min, max(n_lambda, 2))
 
         # Assign folds
@@ -363,8 +369,6 @@ class Finemapping:
       to be retained.
     - n_bootstrap: Number of stability-selection resamples.
     - subsample_frac: Fraction of samples per resample.
-    - stability_threshold: Threshold on selection probability pi_v for the
-      is_stable flag.
     - n_lambda: Number of lambda grid points for CV-based selection.
     - lambda_ratio: lam_min / lam_max ratio for the grid.
     - cv_tau: Range-based tolerance for lambda selection
@@ -373,6 +377,15 @@ class Finemapping:
     - min_obs_boot: Hard minimum observed entries per variant inside
       each bootstrap subsample. Variants with fewer observations are
       skipped for that resample.
+    - compute_r2: If True, compute R² for baseline (covariates only)
+      and full (covariates + selected variants) models for each
+      phenotype and include the values in the output.
+    - r2_stability_threshold: Minimum stability score for variant
+      selection in R² computation.
+    - peak_gap: Maximum distance (bp) for grouping variants into
+      clusters for R² pre-filtering.
+    - max_per_cluster: Maximum variants kept per cluster (highest
+      stability) for R² computation.
     """
 
     def __init__(
@@ -391,11 +404,14 @@ class Finemapping:
         coverage_tau: float = 0.6,
         n_bootstrap: int = 200,
         subsample_frac: float = 0.8,
-        stability_threshold: float = 0.6,
         n_lambda: int = 30,
         lambda_ratio: float = 0.01,
         cv_tau: float = 0.8,
         min_obs_boot: int = 20,
+        compute_r2: bool = False,
+        r2_stability_threshold: float = 0.75,
+        peak_gap: int = 50_000,
+        max_per_cluster: int = 1,
     ):
         self.chromosome = chromosome
 
@@ -453,11 +469,14 @@ class Finemapping:
         self.coverage_tau = coverage_tau
         self.n_bootstrap = n_bootstrap
         self.subsample_frac = subsample_frac
-        self.stability_threshold = stability_threshold
         self.n_lambda = n_lambda
         self.lambda_ratio = lambda_ratio
         self.cv_tau = cv_tau
         self.min_obs_boot = min_obs_boot
+        self.compute_r2_flag = compute_r2
+        self.r2_stability_threshold = r2_stability_threshold
+        self.peak_gap = peak_gap
+        self.max_per_cluster = max_per_cluster
 
         self.bootstrap_nonzero_diagnostics = pd.DataFrame(
             columns=["phenotype", "variant", "bootstrap_iteration", "beta_full"]
@@ -599,12 +618,14 @@ class Finemapping:
 
         # 8) Build X_unpen = [intercept, CNlr_std, phenotype_cov_std, cov_std...]
         blocks: List[np.ndarray] = [np.ones(n_good)]
+        cnlr_col: Optional[int] = None
 
         if cnlr_full is not None:
             cnlr = cnlr_full[mask]
             mu_cn, sd_cn = float(np.mean(cnlr)), float(np.std(cnlr))
             if sd_cn > 1e-10:
                 cnlr = (cnlr - mu_cn) / sd_cn
+            cnlr_col = len(blocks)
             blocks.append(cnlr)
 
         if phenotype_cov_full is not None:
@@ -629,6 +650,7 @@ class Finemapping:
             "y": y,
             "X_unpen": X_unpen,
             "n_samples": n_good,
+            "cnlr_col": cnlr_col,
         }
 
     def _stability_selection(
@@ -717,55 +739,65 @@ class Finemapping:
         return pi_v, mean_beta, sign_consist, bootstrap_nonzero_rows
 
     def _empty_result(self, phenotype: str, n_samples: int = 0) -> pd.DataFrame:
-        return pd.DataFrame(
-            [
-                {
-                    "phenotype": phenotype,
-                    "variant": np.nan,
-                    "n_samples": n_samples,
-                    "n_variants": 0,
-                    "n_obs": 0,
-                    "median_n_obs": np.nan,
-                    "stability_score": np.nan,
-                    "is_stable": False,
-                    "mean_beta": np.nan,
-                    "sign_consistency": np.nan,
-                    "lambda_selected": np.nan,
-                    "lambda_bic": np.nan,
-                    "beta_full": np.nan,
-                    "beta_full_raw": np.nan,
-                }
-            ]
-        )
+        row = {
+            "phenotype": phenotype,
+            "variant": np.nan,
+            "n_samples": n_samples,
+            "n_variants": 0,
+            "n_obs": 0,
+            "median_n_obs": np.nan,
+            "mean_d": np.nan,
+            "sd_d": np.nan,
+            "frac_alt_gain": np.nan,
+            "frac_ref_gain": np.nan,
+            "frac_balanced": np.nan,
+            "stability_score": np.nan,
+            "mean_beta": np.nan,
+            "sign_consistency": np.nan,
+            "lambda_selected": np.nan,
+            "lambda_bic": np.nan,
+            "beta_full": np.nan,
+            "beta_full_raw": np.nan,
+            "beta_cnlr": np.nan,
+            "effect_interpretation": np.nan,
+        }
+        return pd.DataFrame([row])
 
     def _empty_bootstrap_diagnostics(self) -> pd.DataFrame:
         return pd.DataFrame(
             columns=["phenotype", "variant", "bootstrap_iteration", "beta_full"]
         )
 
-    def _process_phenotype(self, pheno_index: int) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    def _process_phenotype(
+        self, pheno_index: int
+    ) -> Tuple[pd.DataFrame, pd.DataFrame, Optional[dict]]:
         """Full finemapping pipeline for one phenotype."""
         current_pheno = self.quan.index[pheno_index]
         data = self._prepare_phenotype(pheno_index)
         if data is None:
-            return self._empty_result(
-                current_pheno
-            ), self._empty_bootstrap_diagnostics()
+            return (
+                self._empty_result(current_pheno),
+                self._empty_bootstrap_diagnostics(),
+                None,
+            )
 
         variant_ids = data["variant_ids"]
         d_raw = data["d_raw"]
         y = data["y"]
         X_unpen = data["X_unpen"]
         n_samples = data["n_samples"]
+        cnlr_col = data["cnlr_col"]
 
         # Standardise & coverage filter (full data)
         d_std, obs_masks, keep_idx, sd_vec = standardize_variants(
             d_raw, self.coverage_tau, n_samples
         )
         if len(keep_idx) == 0:
-            return self._empty_result(
-                current_pheno, n_samples
-            ), self._empty_bootstrap_diagnostics()
+            return (
+                self._empty_result(current_pheno, n_samples),
+                self._empty_bootstrap_diagnostics(),
+                None,
+            )
 
         kept_ids = variant_ids[keep_idx]
         p_kept = len(kept_ids)
@@ -786,6 +818,9 @@ class Finemapping:
             seed=42 + pheno_index,
         )
 
+        # Extract CNlr coefficient from unpenalised block
+        beta_cnlr = float(best_theta[cnlr_col]) if cnlr_col is not None else np.nan
+
         # Stability selection
         rng = np.random.default_rng(seed=42 + pheno_index)
         d_raw_kept = d_raw[keep_idx]
@@ -802,19 +837,59 @@ class Finemapping:
             )
         )
 
+        # ── R² computation (optional) ──
+        r2_info: Optional[dict] = None
+        if self.compute_r2_flag:
+            r2_info = self._compute_r2_from_fit(
+                current_pheno,
+                y,
+                X_unpen,
+                d_std,
+                obs_masks,
+                pi_v,
+                best_beta_refit,
+                kept_ids,
+                n_samples,
+            )
+
         # Assemble per-variant results
+        d_raw_kept = d_raw[keep_idx]
+        d_threshold = 0.1  # ~7% allelic ratio shift
         rows = []
         for j in range(p_kept):
+            obs_d = d_raw_kept[j, obs_masks[j]]
+            n_obs_j = len(obs_d)
+            m_d = float(np.mean(obs_d))
+            s_d = float(np.std(obs_d))
+            b = best_beta_refit[j]
+
+            # Allelic imbalance fractions
+            frac_alt_gain = float(np.sum(obs_d < -d_threshold)) / n_obs_j
+            frac_ref_gain = float(np.sum(obs_d > d_threshold)) / n_obs_j
+            frac_balanced = float(np.sum(np.abs(obs_d) <= d_threshold)) / n_obs_j
+
+            # Causal interpretation from beta sign alone
+            if abs(b) < 1e-10:
+                interp = "no effect"
+            elif b < 0:
+                interp = "ALT gain increases phenotype; REF gain decreases phenotype"
+            else:
+                interp = "REF gain increases phenotype; ALT gain decreases phenotype"
+
             rows.append(
                 {
                     "phenotype": current_pheno,
                     "variant": kept_ids[j],
                     "n_samples": n_samples,
                     "n_variants": p_kept,
-                    "n_obs": len(obs_masks[j]),
+                    "n_obs": n_obs_j,
                     "median_n_obs": median_n_obs,
+                    "mean_d": m_d,
+                    "sd_d": s_d,
+                    "frac_alt_gain": frac_alt_gain,
+                    "frac_ref_gain": frac_ref_gain,
+                    "frac_balanced": frac_balanced,
                     "stability_score": float(pi_v[j]),
-                    "is_stable": bool(pi_v[j] >= self.stability_threshold),
                     "mean_beta": float(mean_beta[j]),
                     "sign_consistency": (
                         float(sign_consist[j])
@@ -823,8 +898,10 @@ class Finemapping:
                     ),
                     "lambda_selected": float(lam_selected),
                     "lambda_bic": float(lam_selected),
-                    "beta_full": float(best_beta_refit[j]),
-                    "beta_full_raw": float(best_beta_refit[j] / sd_vec[j]),
+                    "beta_full": float(b),
+                    "beta_full_raw": float(b / sd_vec[j]),
+                    "beta_cnlr": beta_cnlr,
+                    "effect_interpretation": interp,
                 }
             )
 
@@ -833,7 +910,7 @@ class Finemapping:
             columns=["phenotype", "variant", "bootstrap_iteration", "beta_full"],
         )
 
-        return pd.DataFrame(rows), bootstrap_diag_df
+        return pd.DataFrame(rows), bootstrap_diag_df, r2_info
 
     def calculate_finemapping(self, phenotype_id: Optional[str] = None) -> pd.DataFrame:
         """
@@ -852,7 +929,9 @@ class Finemapping:
                     f"Phenotype '{phenotype_id}' not found on {self.chromosome}. "
                     f"Available: {self.quan.index.tolist()[:5]}{'...' if len(self.quan) > 5 else ''}"
                 )
-            pheno_indices = [self.quan.index.get_loc(phenotype_id)]
+            loc = self.quan.index.get_loc(phenotype_id)
+            assert isinstance(loc, int), f"Duplicate phenotype ID '{phenotype_id}'"
+            pheno_indices: list[int] = [loc]
             desc = f"Finemapping {phenotype_id}"
         else:
             pheno_indices = list(range(self.quan.shape[0]))
@@ -880,19 +959,136 @@ class Finemapping:
 
         main_results = [res[0] for res in results]
         diag_results = [res[1] for res in results]
+        r2_rows = [res[2] for res in results if res[2] is not None]
 
         self.bootstrap_nonzero_diagnostics = pd.concat(diag_results, ignore_index=True)
+        self.r2_results = pd.DataFrame(r2_rows) if r2_rows else pd.DataFrame()
         return pd.concat(main_results, ignore_index=True)
 
     def _process_phenotype_safe(
         self, pheno_index: int
-    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    ) -> Tuple[pd.DataFrame, pd.DataFrame, Optional[dict]]:
         """Exception-safe wrapper for multiprocessing workers."""
         try:
             return self._process_phenotype(pheno_index)
         except Exception as e:
             current_pheno = self.quan.index[pheno_index]
             print(f"[finemapping] Error for phenotype {current_pheno}: {e}")
-            return self._empty_result(
-                current_pheno
-            ), self._empty_bootstrap_diagnostics()
+            return (
+                self._empty_result(current_pheno),
+                self._empty_bootstrap_diagnostics(),
+                None,
+            )
+
+    # ==================================================================
+    # R² computation (internal, called from _process_phenotype)
+    # ==================================================================
+
+    def _compute_r2_from_fit(
+        self,
+        phenotype: str,
+        y: np.ndarray,
+        X_unpen: np.ndarray,
+        d_std: np.ndarray,
+        obs_masks: List[np.ndarray],
+        pi_v: np.ndarray,
+        best_beta_refit: np.ndarray,
+        kept_ids: np.ndarray,
+        n_samples: int,
+    ) -> dict:
+        """
+        Compute baseline vs full-model R² using already-fitted results.
+
+        Selects stable variants (π ≥ r2_stability_threshold with non-zero
+        beta), clusters them by position, keeps at most max_per_cluster per
+        cluster (ties broken by abs(beta)), then fits a missing-aware
+        unpenalised model (MissingAwareElasticNet with λ=0) for the full
+        model and standard OLS for the baseline (covariates only).
+
+        Predictions are computed with missing-aware logic: for each sample,
+        only observed variant entries contribute to ŷ. R² is computed over
+        all n samples — no imputation is performed.
+
+        Returns a dict with one row of R² results for this phenotype,
+        or None if no variants qualify.
+        """
+        from collections import defaultdict
+
+        n = len(y)
+
+        # Identify stable variants with non-zero effect
+        # Store (index_in_kept, stability, abs_beta, position)
+        candidates = []
+        for j in range(len(kept_ids)):
+            if (
+                pi_v[j] >= self.r2_stability_threshold
+                and abs(best_beta_refit[j]) > 1e-10
+            ):
+                pos_j = int(kept_ids[j].split(":")[1])
+                candidates.append(
+                    (j, float(pi_v[j]), abs(float(best_beta_refit[j])), pos_j)
+                )
+
+        if len(candidates) == 0:
+            return None
+
+        # Cluster by position and pre-filter
+        positions = np.array([c[3] for c in candidates])
+        peak_ids = assign_peaks(positions, self.peak_gap)
+
+        # Group by cluster; sort key = (stability, abs_beta)
+        peak_groups: Dict[int, List[Tuple[float, float, int]]] = defaultdict(list)
+        for idx, (j, pi, abs_b, _pos) in enumerate(candidates):
+            peak_groups[peak_ids[idx]].append((pi, abs_b, j))
+
+        filtered_indices = []
+        for members in peak_groups.values():
+            # Sort by stability desc, then abs(beta) desc to break ties
+            members.sort(key=lambda x: (x[0], x[1]), reverse=True)
+            for _, _, j in members[: self.max_per_cluster]:
+                filtered_indices.append(j)
+        sel_indices = np.array(sorted(filtered_indices))
+        n_clusters = len(peak_groups)
+
+        if len(sel_indices) == 0:
+            return None
+
+        # Variant IDs and obs masks for the selected subset
+        selected_variant_ids = [kept_ids[j] for j in sel_indices]
+        d_sel = d_std[sel_indices, :]  # (p_sel, n)
+        sel_obs_masks = [obs_masks[j] for j in sel_indices]
+        p_sel = len(sel_indices)
+
+        # ── Baseline model: y ~ X_unpen (no missingness) ──
+        theta_base = ols_fit(y, X_unpen)
+        yhat_base = X_unpen @ theta_base
+        r2_base = r_squared(y, yhat_base)
+        r2_base_adj = adjusted_r_squared(r2_base, n, X_unpen.shape[1] - 1)
+
+        # ── Full model: missing-aware unpenalised fit (EN with λ=0) ──
+        en = MissingAwareElasticNet(alpha_en=0.5, max_iter=2000, tol=1e-8)
+        beta_full, theta_full, _, _ = en.fit(y, d_sel, sel_obs_masks, X_unpen, lam=0.0)
+
+        # Missing-aware predictions: y_hat_i = X_unpen_i @ theta + sum_{j observed} d_j,i * beta_j
+        yhat_full = X_unpen @ theta_full
+        for v in range(p_sel):
+            idx = sel_obs_masks[v]
+            if len(idx) > 0 and beta_full[v] != 0.0:
+                yhat_full[idx] += beta_full[v] * d_sel[v, idx]
+
+        r2_full_val = r_squared(y, yhat_full)
+        r2_full_adj = adjusted_r_squared(r2_full_val, n, X_unpen.shape[1] - 1 + p_sel)
+
+        return {
+            "phenotype": phenotype,
+            "n_samples": n_samples,
+            "r2_baseline": r2_base,
+            "r2_baseline_adj": r2_base_adj,
+            "r2_full": r2_full_val,
+            "r2_full_adj": r2_full_adj,
+            "delta_r2": r2_full_val - r2_base,
+            "delta_r2_adj": r2_full_adj - r2_base_adj,
+            "r2_n_variants": len(sel_indices),
+            "r2_n_clusters": n_clusters,
+            "r2_variants": ";".join(selected_variant_ids),
+        }

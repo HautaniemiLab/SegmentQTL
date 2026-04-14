@@ -27,7 +27,6 @@ def main():
     parser.add_argument(
         "--copynumber",
         type=str,
-        default=None,
         help="Path to phenotype-level copy-number covariate CSV (e.g. CNlr). "
         "In perm mode: used for Freedman-Lane residualization (removes CN-driven "
         "structure before permuting for proper exchangeability). "
@@ -75,7 +74,7 @@ def main():
     parser.add_argument(
         "--window",
         type=int,
-        default=500000,
+        default=1000000,
         help="Window size",
     )
     parser.add_argument(
@@ -87,6 +86,7 @@ def main():
     parser.add_argument(
         "--out_dir",
         type=str,
+        default="./results/",
         help="Directory where intermediate results are saved",
     )
     parser.add_argument(
@@ -137,12 +137,6 @@ def main():
         help="Fraction of samples per bootstrap resample. Default: 0.8.",
     )
     parser.add_argument(
-        "--stability_threshold",
-        type=float,
-        default=0.6,
-        help="Selection probability threshold for stable variants. Default: 0.6.",
-    )
-    parser.add_argument(
         "--n_lambda",
         type=int,
         default=30,
@@ -172,6 +166,30 @@ def main():
         default=None,
         help="Phenotype ID to finemap (finemap mode only). If not provided, all phenotypes on the chromosome are finemapped.",
     )
+    parser.add_argument(
+        "--compute_r2",
+        action="store_true",
+        default=False,
+        help="(finemap mode) Compute R² for baseline vs full model and include in output.",
+    )
+    parser.add_argument(
+        "--r2_stability_threshold",
+        type=float,
+        default=0.75,
+        help="(finemap mode) Minimum stability score for variant selection in R² computation. Default: 0.75.",
+    )
+    parser.add_argument(
+        "--peak_gap",
+        type=int,
+        default=50000,
+        help="(finemap mode) Max distance (bp) for grouping variants into clusters for R². Default: 50000.",
+    )
+    parser.add_argument(
+        "--max_per_cluster",
+        type=int,
+        default=1,
+        help="(finemap mode) Max variants kept per cluster (highest stability) for R². Default: 1.",
+    )
 
     args = parser.parse_args()
 
@@ -180,7 +198,7 @@ def main():
         out_dir = out_dir + "/"
 
     mode = args.mode
-    if mode == "nominal" or mode == "perm" or mode == "finemap":
+    if mode in ("nominal", "perm", "finemap"):
         chromosome = args.chromosome
         if not chromosome.startswith("chr"):
             chromosome = "chr" + chromosome
@@ -218,11 +236,14 @@ def main():
                 coverage_tau=args.coverage_tau,
                 n_bootstrap=args.n_bootstrap,
                 subsample_frac=args.subsample_frac,
-                stability_threshold=args.stability_threshold,
                 n_lambda=args.n_lambda,
                 lambda_ratio=args.lambda_ratio,
                 cv_tau=args.cv_tau,
                 min_obs_boot=args.min_obs_boot,
+                compute_r2=args.compute_r2,
+                r2_stability_threshold=args.r2_stability_threshold,
+                peak_gap=args.peak_gap,
+                max_per_cluster=args.max_per_cluster,
             )
             mapping = finemapper.calculate_finemapping(phenotype_id=args.phenotype_id)
 
@@ -234,12 +255,16 @@ def main():
             if args.phenotype_id is not None:
                 fname = f"{out_dir}finemap_{chromosome}_{args.phenotype_id}.csv"
                 diag_fname = f"{out_dir}finemap_bootstrap_nonzero_{chromosome}_{args.phenotype_id}.csv"
+                r2_fname = f"{out_dir}finemap_r2_{chromosome}_{args.phenotype_id}.csv"
             else:
                 fname = f"{out_dir}finemap_{chromosome}.csv"
                 diag_fname = f"{out_dir}finemap_bootstrap_nonzero_{chromosome}.csv"
+                r2_fname = f"{out_dir}finemap_r2_{chromosome}.csv"
 
             mapping.to_csv(fname, index=False)
             finemapper.bootstrap_nonzero_diagnostics.to_csv(diag_fname, index=False)
+            if not finemapper.r2_results.empty:
+                finemapper.r2_results.to_csv(r2_fname, index=False)
             return
 
         # Validate: permutation mode with all_variants is not supported
