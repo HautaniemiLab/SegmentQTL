@@ -5,6 +5,9 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+from numba import njit
+from tqdm import tqdm
+
 from segment_utils import (
     filter_variants_to_common_segment,
     phenotype_window_bounds,
@@ -18,7 +21,131 @@ from statistical_utils import (
     standardize_variants,
     standardize_variants_bootstrap,
 )
-from tqdm import tqdm
+
+# ======================================================================
+# Numba-accelerated kernels for coordinate descent
+# ======================================================================
+
+
+def _obs_masks_to_csr(obs_masks: List[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
+    """Convert list-of-arrays obs_masks to CSR-like (indices, offsets)."""
+    lengths = [len(m) for m in obs_masks]
+    total = sum(lengths)
+    offsets = np.empty(len(obs_masks) + 1, dtype=np.intp)
+    offsets[0] = 0
+    for i, ln in enumerate(lengths):
+        offsets[i + 1] = offsets[i] + ln
+    indices = np.empty(total, dtype=np.intp)
+    for i, m in enumerate(obs_masks):
+        indices[offsets[i] : offsets[i + 1]] = m
+    return indices, offsets
+
+
+@njit(cache=True)
+def _compute_G(d_std, csr_idx, csr_off, p):
+    """Precompute G_v = sum d_tilde_v^2 for each variant (observed entries)."""
+    G = np.zeros(p)
+    for v in range(p):
+        s = csr_off[v]
+        e = csr_off[v + 1]
+        acc = 0.0
+        for k in range(s, e):
+            val = d_std[v, csr_idx[k]]
+            acc += val * val
+        G[v] = acc
+    return G
+
+
+@njit(cache=True)
+def _init_residuals(r, beta, d_std, csr_idx, csr_off, p):
+    """Subtract beta_v * d_std[v, obs] from residuals for non-zero betas."""
+    for v in range(p):
+        if beta[v] != 0.0:
+            s = csr_off[v]
+            e = csr_off[v + 1]
+            bv = beta[v]
+            for k in range(s, e):
+                r[csr_idx[k]] -= bv * d_std[v, csr_idx[k]]
+
+
+@njit(cache=True)
+def _cd_sweep(d_std, r, beta, G, csr_idx, csr_off, p, lam1, lam2):
+    """One full coordinate-descent pass. Returns max |change|."""
+    max_change = 0.0
+    for v in range(p):
+        s = csr_off[v]
+        e = csr_off[v + 1]
+        if s == e or G[v] == 0.0:
+            continue
+
+        old = beta[v]
+
+        # z_v = <d_v, r[obs]> + old * G_v
+        z_v = 0.0
+        for k in range(s, e):
+            z_v += d_std[v, csr_idx[k]] * r[csr_idx[k]]
+        z_v += old * G[v]
+
+        # Soft threshold
+        if z_v > lam1:
+            new = (z_v - lam1) / (G[v] + lam2)
+        elif z_v < -lam1:
+            new = (z_v + lam1) / (G[v] + lam2)
+        else:
+            new = 0.0
+
+        if new != old:
+            diff = old - new
+            for k in range(s, e):
+                r[csr_idx[k]] += d_std[v, csr_idx[k]] * diff
+            beta[v] = new
+            change = abs(new - old)
+            if change > max_change:
+                max_change = change
+
+    return max_change
+
+
+@njit(cache=True)
+def _subtract_beta_contributions(y_adj, beta, d_std, csr_idx, csr_off, p):
+    """Subtract beta_v * d_std[v, obs_v] from y_adj in-place."""
+    for v in range(p):
+        if beta[v] != 0.0:
+            s = csr_off[v]
+            e = csr_off[v + 1]
+            bv = beta[v]
+            for k in range(s, e):
+                y_adj[csr_idx[k]] -= bv * d_std[v, csr_idx[k]]
+
+
+@njit(cache=True)
+def _compute_lambda_max_grad(d_std, r0, csr_idx, csr_off, p):
+    """Max |gradient| across variants at beta=0."""
+    max_abs_grad = 0.0
+    for v in range(p):
+        s = csr_off[v]
+        e = csr_off[v + 1]
+        if s == e:
+            continue
+        g = 0.0
+        for k in range(s, e):
+            g += d_std[v, csr_idx[k]] * r0[csr_idx[k]]
+        g = abs(g)
+        if g > max_abs_grad:
+            max_abs_grad = g
+    return max_abs_grad
+
+
+@njit(cache=True)
+def _add_beta_contributions(pred, beta, d_std, csr_idx, csr_off, p):
+    """Add beta_v * d_std[v, obs_v] to pred in-place (for test-fold prediction)."""
+    for v in range(p):
+        if beta[v] != 0.0:
+            s = csr_off[v]
+            e = csr_off[v + 1]
+            bv = beta[v]
+            for k in range(s, e):
+                pred[csr_idx[k]] += bv * d_std[v, csr_idx[k]]
 
 
 class MissingAwareElasticNet:
@@ -45,10 +172,6 @@ class MissingAwareElasticNet:
         self.max_iter = max_iter
         self.tol = tol
 
-    def _soft_threshold(self, z: float, lam: float) -> float:
-        """Soft-thresholding operator S(z, lam) = sign(z) max(|z| - lam, 0)."""
-        return float(np.sign(z)) * max(abs(z) - lam, 0.0)
-
     def _ols(self, y: np.ndarray, X: np.ndarray) -> np.ndarray:
         """Ordinary least-squares: y = X theta.  Returns theta."""
         try:
@@ -63,6 +186,8 @@ class MissingAwareElasticNet:
         d_std: np.ndarray,
         obs_masks: List[np.ndarray],
         X_unpen: np.ndarray,
+        csr_idx: Optional[np.ndarray] = None,
+        csr_off: Optional[np.ndarray] = None,
     ) -> float:
         """
         Smallest lambda for which all beta_v = 0.
@@ -74,13 +199,12 @@ class MissingAwareElasticNet:
         theta0 = self._ols(y, X_unpen)
         r0 = y - X_unpen @ theta0
 
-        max_abs_grad = 0.0
-        for v, idx in enumerate(obs_masks):
-            if len(idx) == 0:
-                continue
-            g = abs(np.dot(d_std[v, idx], r0[idx]))
-            if g > max_abs_grad:
-                max_abs_grad = g
+        if csr_idx is None or csr_off is None:
+            csr_idx, csr_off = _obs_masks_to_csr(obs_masks)
+
+        max_abs_grad = _compute_lambda_max_grad(
+            d_std, r0, csr_idx, csr_off, d_std.shape[0]
+        )
 
         if self.alpha_en > 0:
             return max_abs_grad / self.alpha_en
@@ -95,6 +219,8 @@ class MissingAwareElasticNet:
         lam: float,
         beta_init: Optional[np.ndarray] = None,
         theta_init: Optional[np.ndarray] = None,
+        csr_idx: Optional[np.ndarray] = None,
+        csr_off: Optional[np.ndarray] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int]:
         """
         Fit the model for a single lambda value.
@@ -107,6 +233,8 @@ class MissingAwareElasticNet:
         - lam: penalty magnitude.
         - beta_init: optional warm-start for beta.
         - theta_init: optional warm-start for theta.
+        - csr_idx: optional precomputed CSR indices from _obs_masks_to_csr.
+        - csr_off: optional precomputed CSR offsets from _obs_masks_to_csr.
 
         Returns:
         - beta: (p,) penalised coefficients.
@@ -118,60 +246,31 @@ class MissingAwareElasticNet:
         lam1 = lam * self.alpha_en
         lam2 = lam * (1.0 - self.alpha_en)
 
+        if csr_idx is None or csr_off is None:
+            csr_idx, csr_off = _obs_masks_to_csr(obs_masks)
+
         # Initialise
         theta = theta_init.copy() if theta_init is not None else self._ols(y, X_unpen)
         beta = beta_init.copy() if beta_init is not None else np.zeros(p)
 
         # Initial residuals
         r = y - X_unpen @ theta
-        for v in range(p):
-            if beta[v] != 0.0:
-                idx = obs_masks[v]
-                if len(idx) > 0:
-                    r[idx] -= beta[v] * d_std[v, idx]
+        _init_residuals(r, beta, d_std, csr_idx, csr_off, p)
 
         # Precompute G_v = sum d_tilde^2 per variant
-        G = np.zeros(p)
-        for v in range(p):
-            idx = obs_masks[v]
-            if len(idx) > 0:
-                G[v] = np.sum(d_std[v, idx] ** 2)
+        G = _compute_G(d_std, csr_idx, csr_off, p)
 
         # Coordinate descent
         n_iter = 0
         for it in range(self.max_iter):
-            max_change = 0.0
-            for v in range(p):
-                idx = obs_masks[v]
-                if len(idx) == 0 or G[v] == 0.0:
-                    continue
-
-                d_v = d_std[v, idx]
-                old = beta[v]
-
-                # z_v = <d_tilde_v, partial_resid_v>
-                #     = <d_tilde_v, r> + old * G_v
-                z_v = np.dot(d_v, r[idx]) + old * G[v]
-
-                new = self._soft_threshold(z_v, lam1) / (G[v] + lam2)
-
-                if new != old:
-                    r[idx] += d_v * (old - new)
-                    beta[v] = new
-                    change = abs(new - old)
-                    if change > max_change:
-                        max_change = change
+            max_change = _cd_sweep(d_std, r, beta, G, csr_idx, csr_off, p, lam1, lam2)
 
             n_iter = it + 1
 
             # Refit unpenalised block every 5 passes
             if n_iter % 5 == 0:
                 y_adj = y.copy()
-                for v in range(p):
-                    if beta[v] != 0.0:
-                        idx = obs_masks[v]
-                        if len(idx) > 0:
-                            y_adj[idx] -= beta[v] * d_std[v, idx]
+                _subtract_beta_contributions(y_adj, beta, d_std, csr_idx, csr_off, p)
                 theta = self._ols(y_adj, X_unpen)
                 r = y_adj - X_unpen @ theta
 
@@ -180,11 +279,7 @@ class MissingAwareElasticNet:
 
         # Final unpenalised refit
         y_adj = y.copy()
-        for v in range(p):
-            if beta[v] != 0.0:
-                idx = obs_masks[v]
-                if len(idx) > 0:
-                    y_adj[idx] -= beta[v] * d_std[v, idx]
+        _subtract_beta_contributions(y_adj, beta, d_std, csr_idx, csr_off, p)
         theta = self._ols(y_adj, X_unpen)
         r = y_adj - X_unpen @ theta
 
@@ -232,6 +327,9 @@ class MissingAwareElasticNet:
         n = len(y)
         p = d_std.shape[0]
 
+        # Precompute CSR for full obs_masks (used for final refit)
+        csr_idx_full, csr_off_full = _obs_masks_to_csr(obs_masks)
+
         # Log-spaced grid: large (sparse) to small (dense)
         lambdas = np.geomspace(lam_max, lam_min, max(n_lambda, 2))
 
@@ -265,11 +363,24 @@ class MissingAwareElasticNet:
                 in_train = train_bool[v_mask]
                 obs_masks_train.append(old_to_train[v_mask[in_train]])
 
-            # Precompute test mapping for prediction
+            # Precompute CSR for training fold
+            csr_idx_train, csr_off_train = _obs_masks_to_csr(obs_masks_train)
+
+            # Build test-fold prediction obs_masks (remapped to test-local indices)
             old_to_test = np.full(n, -1, dtype=np.intp)
             old_to_test[test_idx] = np.arange(len(test_idx))
             test_bool = np.zeros(n, dtype=bool)
             test_bool[test_idx] = True
+
+            obs_masks_test: List[np.ndarray] = []
+            for v_mask in obs_masks:
+                in_test = test_bool[v_mask]
+                obs_masks_test.append(old_to_test[v_mask[in_test]])
+
+            csr_idx_test, csr_off_test = _obs_masks_to_csr(obs_masks_test)
+
+            # d_std remapped to test-local columns
+            d_test = d_std[:, test_idx]
 
             # Warm-start along the lambda path
             beta_ws: Optional[np.ndarray] = None
@@ -284,19 +395,17 @@ class MissingAwareElasticNet:
                     lam,
                     beta_init=beta_ws,
                     theta_init=theta_ws,
+                    csr_idx=csr_idx_train,
+                    csr_off=csr_off_train,
                 )
                 beta_ws = beta
                 theta_ws = theta
 
                 # Predict on test fold
                 pred = X_unpen[test_idx] @ theta
-                for v in range(p):
-                    if beta[v] != 0.0:
-                        obs_in_test = obs_masks[v][test_bool[obs_masks[v]]]
-                        if len(obs_in_test) > 0:
-                            pred[old_to_test[obs_in_test]] += (
-                                beta[v] * d_std[v, obs_in_test]
-                            )
+                _add_beta_contributions(
+                    pred, beta, d_test, csr_idx_test, csr_off_test, p
+                )
 
                 cv_errors[li, fold] = float(np.mean((y[test_idx] - pred) ** 2))
 
@@ -328,6 +437,8 @@ class MissingAwareElasticNet:
             obs_masks,
             X_unpen,
             best_lam,
+            csr_idx=csr_idx_full,
+            csr_off=csr_off_full,
         )
 
         return (
@@ -1067,14 +1178,22 @@ class Finemapping:
 
         # ── Full model: missing-aware unpenalised fit (EN with λ=0) ──
         en = MissingAwareElasticNet(alpha_en=0.5, max_iter=2000, tol=1e-8)
-        beta_full, theta_full, _, _ = en.fit(y, d_sel, sel_obs_masks, X_unpen, lam=0.0)
+        csr_idx_sel, csr_off_sel = _obs_masks_to_csr(sel_obs_masks)
+        beta_full, theta_full, _, _ = en.fit(
+            y,
+            d_sel,
+            sel_obs_masks,
+            X_unpen,
+            lam=0.0,
+            csr_idx=csr_idx_sel,
+            csr_off=csr_off_sel,
+        )
 
         # Missing-aware predictions: y_hat_i = X_unpen_i @ theta + sum_{j observed} d_j,i * beta_j
         yhat_full = X_unpen @ theta_full
-        for v in range(p_sel):
-            idx = sel_obs_masks[v]
-            if len(idx) > 0 and beta_full[v] != 0.0:
-                yhat_full[idx] += beta_full[v] * d_sel[v, idx]
+        _add_beta_contributions(
+            yhat_full, beta_full, d_sel, csr_idx_sel, csr_off_sel, p_sel
+        )
 
         r2_full_val = r_squared(y, yhat_full)
         r2_full_adj = adjusted_r_squared(r2_full_val, n, X_unpen.shape[1] - 1 + p_sel)
