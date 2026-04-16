@@ -6,8 +6,6 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 from numba import njit
-from tqdm import tqdm
-
 from segment_utils import (
     filter_variants_to_common_segment,
     phenotype_window_bounds,
@@ -21,6 +19,7 @@ from statistical_utils import (
     standardize_variants,
     standardize_variants_bootstrap,
 )
+from tqdm import tqdm
 
 # ======================================================================
 # Numba-accelerated kernels for coordinate descent
@@ -562,14 +561,22 @@ class Finemapping:
         )
 
         # Load phenotype-level copy-number covariate (CNlr, optional)
-        self.copynumber_df = self._load(copynumber, index_col=0) if copynumber else None
+        # Reindex columns to self.samples to ensure alignment with y_full
+        if copynumber:
+            cn = self._load(copynumber, index_col=0)
+            self.copynumber_df = cn.loc[:, cn.columns.isin(self.samples)][self.samples]
+        else:
+            self.copynumber_df = None
 
         # Load phenotype-level covariate (optional, additional unpenalised)
-        self.phenotype_covariate_df = (
-            self._load(phenotype_covariate, index_col=0)
-            if phenotype_covariate
-            else None
-        )
+        # Reindex columns to self.samples to ensure alignment with y_full
+        if phenotype_covariate:
+            pc = self._load(phenotype_covariate, index_col=0)
+            self.phenotype_covariate_df = pc.loc[:, pc.columns.isin(self.samples)][
+                self.samples
+            ]
+        else:
+            self.phenotype_covariate_df = None
 
         # Window & parallelism
         self.window = window

@@ -1,11 +1,10 @@
 from multiprocessing import Pool
 from os import path
 from time import time
+from typing import Optional
 
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
-
 from segment_utils import (
     filter_variants_to_common_segment,
     phenotype_window_bounds,
@@ -21,6 +20,7 @@ from statistical_utils import (
 from statistical_utils import (
     gene_variant_regressions_permutations as run_gene_variant_regressions_permutations,
 )
+from tqdm import tqdm
 
 
 class Cis:
@@ -97,6 +97,16 @@ class Cis:
         self.geno_alt = self.geno_alt.loc[common_variants]
         self.geno_ref = self.geno_ref.loc[common_variants]
 
+        # Reindex phenotype-level covariates to self.samples for alignment
+        if self.phenotype_covariate_df is not None:
+            self.phenotype_covariate_df = self.phenotype_covariate_df.loc[
+                :, self.phenotype_covariate_df.columns.isin(self.samples)
+            ][self.samples]
+        if self.perm_covariate_df is not None:
+            self.perm_covariate_df = self.perm_covariate_df.loc[
+                :, self.perm_covariate_df.columns.isin(self.samples)
+            ][self.samples]
+
         # Precompute variant positions once as NumPy array
         variant_index_array = self.geno_alt.index.astype(str).to_numpy()
         self.variant_positions = np.fromiter(
@@ -171,7 +181,7 @@ class Cis:
 
             print(f"[neg_control] Loaded {len(common_neg)} variants from {trans_chr}")
 
-    def load_and_validate_file(self, file_path: str, index_col: int):
+    def load_and_validate_file(self, file_path: str, index_col: Optional[int]):
         """
         Load a CSV file and validate its existence and content.
 
@@ -344,7 +354,7 @@ class Cis:
         GEX: np.ndarray,
         altlr: np.ndarray,
         reflr: np.ndarray,
-        phenotype_cov: np.ndarray,
+        phenotype_cov: Optional[np.ndarray],
         cov_values: list,
     ):
         """
@@ -376,7 +386,8 @@ class Cis:
             lengths.append(len(phenotype_cov))
 
         if len(set(lengths)) != 1:
-            return [], [], [], None, []
+            _empty = np.array([])
+            return _empty, _empty, _empty, None, []
 
         # Filter out rows with NaNs in any of the required columns
         mask = ~np.isnan(GEX) & ~np.isnan(altlr) & ~np.isnan(reflr)
@@ -388,7 +399,8 @@ class Cis:
             mask &= ~np.isnan(cov_value)
 
         if np.sum(mask) < 30:  # If less than 30 valid rows, skip this variant
-            return [], [], [], None, []
+            _empty = np.array([])
+            return _empty, _empty, _empty, None, []
 
         GEX_filtered = GEX[mask]
         altlr_filtered = altlr[mask]
@@ -400,12 +412,14 @@ class Cis:
 
         # Ensure GEX has variance
         if len(np.unique(GEX_filtered)) < 2:
-            return [], [], [], None, []
+            _empty = np.array([])
+            return _empty, _empty, _empty, None, []
 
         # Check that d = REFlr - ALTlr has variance (this is what we're testing)
         d_filtered = reflr_filtered - altlr_filtered
         if not check_d_variance(d_filtered):
-            return [], [], [], None, []
+            _empty = np.array([])
+            return _empty, _empty, _empty, None, []
 
         return (
             GEX_filtered,
@@ -564,7 +578,7 @@ class Cis:
         GEX: np.ndarray,
         altlr: np.ndarray,
         reflr: np.ndarray,
-        phenotype_cov: np.ndarray,
+        phenotype_cov: Optional[np.ndarray],
         cov_values: list,
     ):
         """
