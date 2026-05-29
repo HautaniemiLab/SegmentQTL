@@ -5,22 +5,23 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
-from segment_utils import (
+from tqdm import tqdm
+
+from .segment_utils import (
     filter_variants_to_common_segment,
     phenotype_window_bounds,
     variants_in_window,
 )
-from statistical_utils import (
+from .statistical_utils import (
     check_d_variance,
     fit_ols_and_test,
 )
-from statistical_utils import (
+from .statistical_utils import (
     gene_variant_regressions as run_gene_variant_regressions,
 )
-from statistical_utils import (
+from .statistical_utils import (
     gene_variant_regressions_permutations as run_gene_variant_regressions_permutations,
 )
-from tqdm import tqdm
 
 
 class Cis:

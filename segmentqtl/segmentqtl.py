@@ -1,9 +1,9 @@
 from argparse import ArgumentParser
 from os import makedirs, path
 
-from cis import Cis
-from finemapping import Finemapping
-from validation import Validation
+from .cis import Cis
+from .finemapping import Finemapping
+from .validation import Validation
 
 
 def main():

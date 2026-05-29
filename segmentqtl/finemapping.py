@@ -8,12 +8,12 @@ import pandas as pd
 from numba import njit
 from tqdm import tqdm
 
-from segment_utils import (
+from .segment_utils import (
     filter_variants_to_common_segment,
     phenotype_window_bounds,
     variants_in_window,
 )
-from statistical_utils import (
+from .statistical_utils import (
     adjusted_r_squared,
     ols_fit,
     r_squared,

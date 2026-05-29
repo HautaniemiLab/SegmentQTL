@@ -39,14 +39,14 @@ from scipy.stats import chi2, pearsonr, spearmanr
 from scipy.stats import t as t_dist
 from tqdm import tqdm
 
-from finemapping import (
+from .finemapping import (
     Finemapping,
     MissingAwareElasticNet,
     _add_beta_contributions,
     _obs_masks_to_csr,
     _subtract_beta_contributions,
 )
-from statistical_utils import ols_fit, r_squared, standardize_variants
+from .statistical_utils import ols_fit, r_squared, standardize_variants
 
 # ----------------------------------------------------------------------
 # Stat helpers
