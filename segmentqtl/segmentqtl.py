@@ -3,6 +3,7 @@ from os import makedirs, path
 
 from cis import Cis
 from finemapping import Finemapping
+from validation import Validation
 
 
 def main():
@@ -10,8 +11,8 @@ def main():
     parser.add_argument(
         "--mode",
         type=str,
-        default="perm",
-        help="Nominal (nominal), permutation (perm), or finemapping (finemap)",
+        default="validate",
+        help="Nominal (nominal), permutation (perm), finemapping (finemap), or validation (validate)",
     )
     parser.add_argument(
         "--chromosome",
@@ -27,6 +28,7 @@ def main():
     parser.add_argument(
         "--copynumber",
         type=str,
+        default=None,
         help="Path to phenotype-level copy-number covariate CSV (e.g. CNlr). "
         "In perm mode: used for Freedman-Lane residualization (removes CN-driven "
         "structure before permuting for proper exchangeability). "
@@ -35,20 +37,24 @@ def main():
     parser.add_argument(
         "--quantifications",
         type=str,
+        default=None,
         help="Path to quantifications CSV file",
     )
     parser.add_argument(
         "--covariates",
+        default=None,
         type=str,
         help="Path to covariates CSV file",
     )
     parser.add_argument(
         "--segmentation",
+        default=None,
         type=str,
         help="Path to file with segmentation data",
     )
     parser.add_argument(
         "--genotypes",
+        default=None,
         type=str,
         help="Path to genotypes directory",
     )
@@ -86,7 +92,7 @@ def main():
     parser.add_argument(
         "--out_dir",
         type=str,
-        default="./results/",
+        default=None,
         help="Directory where intermediate results are saved",
     )
     parser.add_argument(
@@ -98,7 +104,6 @@ def main():
     parser.add_argument(
         "--neg_control",
         action="store_true",
-        default=False,
         help="Run trans negative control mode. For each gene on chromosome c, tests "
         "variants from chromosome c+1 (wrapping) instead of cis variants. "
         "Segment consistency filtering is not applied (not meaningful across chromosomes). "
@@ -163,32 +168,121 @@ def main():
     parser.add_argument(
         "--phenotype_id",
         type=str,
-        default=None,
-        help="Phenotype ID to finemap (finemap mode only). If not provided, all phenotypes on the chromosome are finemapped.",
+        # default="ENSG00000086232",
+        help="Phenotype ID to process (finemap or validate mode). If not provided, all phenotypes on the chromosome are processed.",
     )
     parser.add_argument(
         "--compute_r2",
         action="store_true",
-        default=False,
         help="(finemap mode) Compute R² for baseline vs full model and include in output.",
     )
     parser.add_argument(
         "--r2_stability_threshold",
         type=float,
-        default=0.75,
-        help="(finemap mode) Minimum stability score for variant selection in R² computation. Default: 0.75.",
+        default=0.6,
+        help="(finemap mode) Minimum stability score for variant selection in R² computation. Default: 0.6.",
+    )
+
+    # ── Validation-mode arguments ──
+    parser.add_argument(
+        "--val_quantifications",
+        type=str,
+        default=None,
+        help="(validate mode) Path to validation cohort quantifications CSV.",
     )
     parser.add_argument(
-        "--peak_gap",
-        type=int,
-        default=50000,
-        help="(finemap mode) Max distance (bp) for grouping variants into clusters for R². Default: 50000.",
+        "--val_covariates",
+        type=str,
+        default=None,
+        help="(validate mode) Path to validation cohort sample covariates CSV.",
     )
     parser.add_argument(
-        "--max_per_cluster",
+        "--val_segmentation",
+        type=str,
+        default=None,
+        help="(validate mode) Path to validation cohort segmentation CSV.",
+    )
+    parser.add_argument(
+        "--val_genotypes",
+        type=str,
+        default=None,
+        help="(validate mode) Path to validation cohort genotypes directory.",
+    )
+    parser.add_argument(
+        "--val_copynumber",
+        type=str,
+        default=None,
+        help="(validate mode) Path to validation cohort phenotype-level CN covariate CSV.",
+    )
+    parser.add_argument(
+        "--val_phenotype_covariate",
+        type=str,
+        default=None,
+        help="(validate mode) Path to validation cohort additional phenotype-level covariate CSV.",
+    )
+    parser.add_argument(
+        "--validation_mode",
+        type=str,
+        default="recalibrated",
+        choices=["recalibrated", "frozen"],
+        help="(validate mode) Scoring strategy. 'recalibrated' (default) freezes variant betas + main-cohort preprocessing and refits the unpenalised block on validation. 'frozen' applies the discovery model exactly as learned (also reuses main theta).",
+    )
+    parser.add_argument(
+        "--validate_with_bootstrap",
+        action="store_true",
+        help="(validate mode) Run stability-selection bootstraps on the main cohort. Default off (uses CV-selected refit betas).",
+    )
+    parser.add_argument(
+        "--validation_stability_threshold",
+        type=float,
+        default=0.6,
+        help="(validate mode) When --validate_with_bootstrap is set, mask main-cohort betas to zero for variants with stability score below this threshold. Default: 0.6.",
+    )
+    parser.add_argument(
+        "--save_model_audit",
+        action="store_true",
+        help="(validate mode) Write a long-format audit CSV of the final per-phenotype model (genetic betas, variant mu/sd, unpenalised theta and mu/sd) for both main and validation cohorts. Output: validate_model_<chr>.csv",
+    )
+    parser.add_argument(
+        "--bootstrap_ci",
+        action="store_true",
+        help="(validate mode) Compute paired bootstrap 95%% CIs for R² and calibration slope.",
+    )
+    parser.add_argument(
+        "--n_boot_ci",
         type=int,
-        default=1,
-        help="(finemap mode) Max variants kept per cluster (highest stability) for R². Default: 1.",
+        default=1000,
+        help="(validate mode) Number of bootstrap resamples when --bootstrap_ci is set. Default: 1000.",
+    )
+    parser.add_argument(
+        "--finemap_results_dir",
+        type=str,
+        default=None,
+        help="(validate mode) Directory containing pre-computed finemap_<chr>.csv from a prior `--mode finemap` run. When provided, validation reuses the main-cohort betas, mu, sd, lambda, and stability scores from that file instead of refitting the Elastic Net. Hard-errors if variant order or mu/sd disagree with the current main-cohort inputs.",
+    )
+    parser.add_argument(
+        "--restrict_to_supported_phenotypes",
+        action="store_true",
+        help="(validate mode) Restrict scoring to discovery-supported phenotypes (phenotypes with at least one variant passing --support_definition). Requires --finemap_results_dir. Unsupported phenotypes are skipped and do not appear in validation outputs.",
+    )
+    parser.add_argument(
+        "--support_definition",
+        type=str,
+        choices=["stability", "selected"],
+        default="stability",
+        help="(validate mode) Discovery support definition. 'stability' (default): phenotype has any variant with stability_score >= --support_min_stability. 'selected': phenotype has any variant with non-zero beta at lambda_selected. Only used when --restrict_to_supported_phenotypes is set.",
+    )
+    parser.add_argument(
+        "--support_min_stability",
+        type=float,
+        default=0.6,
+        help="(validate mode) Stability-score threshold for support_definition='stability'. Default: 0.6.",
+    )
+    parser.add_argument(
+        "--n_permutations",
+        type=int,
+        default=0,
+        help="(validate mode) Permutation-null replicates. When >0, validation phenotype labels are shuffled K times per gene (genetic component held fixed) and empirical p-values are reported in r2_perm_pval, rho_perm_pval. Use 1000 for FDR-quality nulls; 0 disables (default).",
     )
 
     args = parser.parse_args()
@@ -242,8 +336,6 @@ def main():
                 min_obs_boot=args.min_obs_boot,
                 compute_r2=args.compute_r2,
                 r2_stability_threshold=args.r2_stability_threshold,
-                peak_gap=args.peak_gap,
-                max_per_cluster=args.max_per_cluster,
             )
             mapping = finemapper.calculate_finemapping(phenotype_id=args.phenotype_id)
 
@@ -327,5 +419,93 @@ def main():
 
         mapping.to_csv(fname, index=False)
 
+    elif mode == "validate":
+        chromosome = args.chromosome
+        if not chromosome.startswith("chr"):
+            chromosome = "chr" + chromosome
+
+        # Validate required validation-cohort args
+        required = {
+            "--val_quantifications": args.val_quantifications,
+            "--val_segmentation": args.val_segmentation,
+            "--val_genotypes": args.val_genotypes,
+        }
+        missing = [k for k, v in required.items() if v is None]
+        if missing:
+            raise ValueError(
+                f"--mode validate requires {', '.join(missing)} to be specified."
+            )
+
+        genotype_alt_main = f"{args.genotypes}/{chromosome}_ALTlr.csv"
+        genotype_ref_main = f"{args.genotypes}/{chromosome}_REFlr.csv"
+        genotype_alt_val = f"{args.val_genotypes}/{chromosome}_ALTlr.csv"
+        genotype_ref_val = f"{args.val_genotypes}/{chromosome}_REFlr.csv"
+
+        validator = Validation(
+            chromosome,
+            args.quantifications,
+            args.covariates,
+            args.segmentation,
+            genotype_alt_main,
+            genotype_ref_main,
+            args.copynumber,
+            args.phenotype_covariate,
+            args.val_quantifications,
+            args.val_covariates,
+            args.val_segmentation,
+            genotype_alt_val,
+            genotype_ref_val,
+            args.val_copynumber,
+            args.val_phenotype_covariate,
+            args.window,
+            args.num_cores,
+            alpha_en=args.alpha_en,
+            coverage_tau=args.coverage_tau,
+            n_bootstrap=args.n_bootstrap,
+            subsample_frac=args.subsample_frac,
+            n_lambda=args.n_lambda,
+            lambda_ratio=args.lambda_ratio,
+            cv_tau=args.cv_tau,
+            min_obs_boot=args.min_obs_boot,
+            validation_mode=args.validation_mode,
+            validate_with_bootstrap=args.validate_with_bootstrap,
+            validation_stability_threshold=args.validation_stability_threshold,
+            bootstrap_ci=args.bootstrap_ci,
+            n_boot_ci=args.n_boot_ci,
+            save_model_audit=args.save_model_audit,
+            finemap_results_dir=args.finemap_results_dir,
+            restrict_to_supported_phenotypes=args.restrict_to_supported_phenotypes,
+            support_definition=args.support_definition,
+            support_min_stability=args.support_min_stability,
+            n_permutations=args.n_permutations,
+        )
+        metrics_df, residuals_df, audit_df = validator.calculate_validation(
+            phenotype_id=args.phenotype_id
+        )
+        metrics_df["chr"] = chromosome
+        residuals_df["chr"] = chromosome
+        if not audit_df.empty:
+            audit_df["chr"] = chromosome
+
+        if not path.exists(out_dir):
+            makedirs(out_dir)
+
+        if args.phenotype_id is not None:
+            fname = f"{out_dir}validate_{chromosome}_{args.phenotype_id}.csv"
+            rname = f"{out_dir}validate_residuals_{chromosome}_{args.phenotype_id}.csv"
+            mname = f"{out_dir}validate_model_{chromosome}_{args.phenotype_id}.csv"
+        else:
+            fname = f"{out_dir}validate_{chromosome}.csv"
+            rname = f"{out_dir}validate_residuals_{chromosome}.csv"
+            mname = f"{out_dir}validate_model_{chromosome}.csv"
+
+        metrics_df.to_csv(fname, index=False)
+        residuals_df.to_csv(rname, index=False)
+        if args.save_model_audit:
+            audit_df.to_csv(mname, index=False)
+        return
+
     else:
-        print(f"Invalid mode: {mode}, please select nominal, perm, or finemap.")
+        print(
+            f"Invalid mode: {mode}, please select nominal, perm, finemap, or validate."
+        )
