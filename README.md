@@ -4,7 +4,14 @@
 
 **SegmentQTL** is a segmentation-aware molecular quantitative trait loci (molQTL) analysis tool designed for copy-number–driven cancers. It incorporates genomic segmentation data to improve QTL mapping accuracy by filtering out associations disrupted by structural variations. This approach prevents spurious signals caused by breakpoints, ensuring biologically meaningful genotype-phenotype associations.
 
-SegmentQTL supports both **nominal** and **permutation-based** association testing, along with **false discovery rate (FDR) correction**. The tool efficiently processes large datasets, leveraging multi-core parallelization and supporting continuous genotype dosage data to enhance analysis precision.
+SegmentQTL uses an **allele-specific genotype model**: each variant is represented by two log-ratio dosages, ALTlr (alternate allele) and REFlr (reference allele), supplied as separate per-chromosome files. From these, the tool internally derives the contrast `d = REFlr − ALTlr` used in association testing, and supports four analysis modes:
+
+- **`nominal`** – per-variant association testing.
+- **`perm`** – permutation-based gene-level scan with Freedman–Lane residualization.
+- **`finemap`** – joint multi-variant fitting per cis-window using a missing-aware Elastic Net with stability selection.
+- **`validate`** – assess generalization of finemapped models on an independent cohort.
+
+The tool efficiently processes large datasets through multi-core parallelization.
 
 <img src="images/bySegmentFiltering.png" alt="variantFiltering" width="500"/>
 
@@ -13,12 +20,16 @@ SegmentQTL supports both **nominal** and **permutation-based** association testi
 - [Installation](#installation)
 - [Usage](#usage)
 - [Input File Formats](#input-file-formats)
-  - [1. Genotype Files (Per-Chromosome CSVs)](#1-genotype-files-per-chromosome-csvs)
+  - [1. Genotype Files (Per-Chromosome ALTlr / REFlr CSVs)](#1-genotype-files-per-chromosome-altlr--reflr-csvs)
   - [2. Phenotype Quantifications (CSV)](#2-phenotype-quantifications-csv)
   - [3. Covariate File (CSV)](#3-covariate-file-csv)
   - [4. Copy Number File (CSV)](#4-copy-number-file-csv)
   - [5. Segmentation File (CSV)](#5-segmentation-file-csv)
+  - [6. Phenotype-Level Covariate File (CSV, optional)](#6-phenotype-level-covariate-file-csv-optional)
 - [Output Format](#output-format)
+  - [Nominal / Permutation Output](#nominal--permutation-output)
+  - [Finemapping Output](#finemapping-output)
+  - [Validation Output](#validation-output)
 - [Examples](#examples)
 - [Citation](#citation)
 
@@ -42,69 +53,120 @@ pip install -r requirements.txt
 SegmentQTL is executed via the command line with various options to control input data, analysis modes, and computational resources. The key arguments are:
 
 ### Required Arguments:
-- `--mode`  
-  - Specifies the analysis mode:  
-    - `nominal`: Perform nominal association testing.  
-    - `perm`: Perform permutation-based testing.  
-    - `fdr`: Apply FDR correction to existing results.  
-- `--chromosome`  
+- `--mode`
+  - Specifies the analysis mode:
+    - `nominal`: per-variant association testing.
+    - `perm`: permutation-based gene-level scan.
+    - `finemap`: joint Elastic Net finemapping per cis-window.
+    - `validate`: validation of finemap models on an independent cohort.
+- `--chromosome`
   - Chromosome number (e.g., `21` or `X`). Supports `chr` prefix (e.g., `chr21`).
-- `--genotypes`  
-  - Path to genotype data directory.
-- `--quantifications`  
-  - Path to CSV file containing phenotype quantifications (e.g., gene expression). Note: Provide file with quantification for whole genome. This is needed for reliable permutations even if SegmentQTL processes one chromosome at a time.
-- `--covariates`  
-  - Path to CSV file with sample level covariate data.
-- `--copynumber`  
-  - Path to CSV file with copy number data.
-- `--segmentation`  
+- `--genotypes`
+  - Path to genotype data directory containing per-chromosome ALTlr / REFlr CSVs (see [Genotype Files](#1-genotype-files-per-chromosome-altlr--reflr-csvs)).
+- `--quantifications`
+  - Path to CSV file containing phenotype quantifications (e.g., gene expression). Provide the file with quantifications for the whole genome.
+- `--covariates`
+  - Path to CSV file with sample-level covariate data.
+- `--copynumber`
+  - Path to CSV file with phenotype-level copy-number data (CNlr). In `perm` mode it is required for Freedman–Lane residualization; in `finemap`/`validate` it is included as an unpenalised predictor.
+- `--segmentation`
   - Path to segmentation file with breakpoint data.
-
-### Optional Arguments:
-- `--all_variants`  
-  - Test all variants for a given phenotype. Provide a phenotype ID or use without a value to process all phenotypes.
-- `--perm_method`  
-  - Method used for permutation (`beta` or `direct`).
-- `--num_permutations`  
-  - Number of permutations per phenotype (default: `8000`).
-- `--window`  
-  - Window size in base pairs for cis-mapping (default: `1,000,000` bp).
-- `--num_cores`  
-  - Number of CPU cores to use for parallel processing (default: `1`).
-- `--out_dir`  
+- `--out_dir`
   - Directory where results are saved.
-- `--fdr_out`  
-  - File path for saving FDR-corrected results. Must have .csv file extension.
-- `--plot_threshold`  
-  - P-value threshold for generating plots (`-1` disables plotting).
-- `--plot_dir`  
-  - Directory for saving generated plots.
- 
+
+### Common Optional Arguments:
+- `--phenotype_covariate`
+  - Path to additional phenotype-level covariate CSV. Optional; treated as an unpenalised predictor in `finemap`/`validate`.
+- `--window`
+  - Window size in base pairs for cis-mapping (default: `1,000,000` bp).
+- `--num_cores`
+  - Number of CPU cores to use for parallel processing (default: `1`).
+- `--all_variants`
+  - (nominal mode) Test all variants for a given phenotype. Provide a phenotype ID or use without a value to process all phenotypes.
+- `--perm_method`
+  - (perm mode) Method used for permutation (`beta` or `direct`). Default: `beta`.
+- `--num_permutations`
+  - (perm mode) Number of permutations per phenotype (default: `5000`).
+- `--record_aic`
+  - (nominal/perm mode) Record AIC scores for associations.
+- `--neg_control`
+  - (nominal/perm mode) Run trans negative-control mode. For each gene on chromosome *c*, tests variants from chromosome *c+1* (wrapping). Used for calibration diagnostics.
+
+### Finemapping Optional Arguments:
+- `--alpha_en` – Elastic Net mixing parameter (1 = Lasso, 0 = Ridge). Default: `0.5`.
+- `--coverage_tau` – Minimum fraction of samples observed for a variant. Default: `0.6`.
+- `--n_bootstrap` – Number of stability-selection bootstrap resamples. Default: `200`.
+- `--subsample_frac` – Fraction of samples per bootstrap resample. Default: `0.8`.
+- `--n_lambda` – Number of lambda grid points for CV-based selection. Default: `30`.
+- `--lambda_ratio` – Lower-bound ratio `lam_min / lam_max`. Default: `0.01`.
+- `--cv_tau` – Range-based CV tolerance for sparsity. Default: `0.8`.
+- `--min_obs_boot` – Minimum observed entries per variant within each bootstrap subsample. Default: `20`.
+- `--phenotype_id` – Restrict run to a single phenotype.
+- `--compute_r2` – Compute R² for baseline vs full model and include in output.
+- `--r2_stability_threshold` – Minimum stability score for variant selection in R² computation. Default: `0.6`.
+
+### Validation Optional Arguments:
+Validation reuses the discovery (main) cohort inputs (`--genotypes`, `--quantifications`, `--covariates`, `--segmentation`, `--copynumber`, `--phenotype_covariate`) and adds an independent cohort:
+
+- `--val_genotypes`, `--val_quantifications`, `--val_segmentation` – required validation-cohort inputs.
+- `--val_covariates`, `--val_copynumber`, `--val_phenotype_covariate` – optional validation-cohort inputs.
+- `--validation_mode` – `recalibrated` (default) refits the unpenalised block on validation and freezes the genetic component; `frozen` reuses everything from the discovery fit.
+- `--finemap_results_dir` – Reuse pre-computed `finemap_<chr>.csv` (recommended). Skips refitting the Elastic Net.
+- `--validate_with_bootstrap` / `--validation_stability_threshold` – Mask discovery betas below a stability threshold.
+- `--restrict_to_supported_phenotypes`, `--support_definition`, `--support_min_stability` – Limit validation scoring to phenotypes supported in discovery.
+- `--bootstrap_ci` / `--n_boot_ci` – Paired bootstrap CIs for R² and calibration slope.
+- `--n_permutations` – Validation phenotype-label permutation null (set `> 0` to enable).
+- `--save_model_audit` – Write a long-format per-phenotype model audit CSV.
+
 ## Input File Formats
 
-SegmentQTL requires five main input files: genotypes, quantifications, covariates, copy number data, and segmentation information. Below are the required formats and examples for each input.
+SegmentQTL requires five main inputs: genotypes (ALTlr + REFlr per chromosome), quantifications, sample covariates, copy number, and segmentation. An optional sixth input adds phenotype-level covariates. Below are the required formats and examples for each.
 
 ---
 
-#### 1. Genotype Files (Per-Chromosome CSVs)
+#### 1. Genotype Files (Per-Chromosome ALTlr / REFlr CSVs)
 
-The `--genotypes` argument should point to a directory containing per-chromosome genotype files, typically named chr1.csv, chr2.csv, ..., chr22.csv, chrX.csv
+The `--genotypes` argument should point to a directory containing **two files per chromosome**, one for each allele:
 
-Each file corresponds to one chromosome and contains genotype dosages for multiple samples.
+```
+genotypes/
+  chr1_ALTlr.csv
+  chr1_REFlr.csv
+  chr2_ALTlr.csv
+  chr2_REFlr.csv
+  ...
+  chrX_ALTlr.csv
+  chrX_REFlr.csv
+```
 
-See ![AlleleDoser](https://github.com/HautaniemiLab/AlleleDoser) to compute genotype dosages.
+Each pair encodes log-ratio allelic dosages for the same set of variants and samples.
 
 ##### **Required Columns:**
-- **`ID`**: Variant identifier in the format `chr:pos:ref:alt` (e.g., `chr8:123456:A:G`).
-- **`<sample1>`**, **`<sample2>`**, ...: Sample-specific dosage values. Dosages are continuous values between `0` and `1`.
+- **`ID`**: Variant identifier in the format `chr:pos:ref:alt` (e.g., `chr8:123456:A:G`). The `ID` column must be identical (and in the same order) between the ALTlr and REFlr files of a chromosome.
+- **`<sample1>`**, **`<sample2>`**, ...: Per-sample log-ratio dosage values.
 
-##### **Example File Format (chr8.csv):**
+##### **Required input transform (computed by the user upstream):**
+SegmentQTL does not perform this normalization itself; it assumes the genotype files already contain the floored, shifted log-ratios
+
+$$
+\begin{aligned}
+\mathrm{ALTlr} &= \max\!\left(\log_2\!\left(\frac{\mathrm{ALTcn}}{\mathrm{ploidy}}\right),\, -2\right) + 2, \\
+\mathrm{REFlr} &= \max\!\left(\log_2\!\left(\frac{\mathrm{REFcn}}{\mathrm{ploidy}}\right),\, -2\right) + 2,
+\end{aligned}
+$$
+
+where `ALTcn` / `REFcn` are the alternate / reference allele copy numbers and `ploidy` is the sample ploidy. Internally SegmentQTL works with the contrast `d = REFlr − ALTlr`.
+
+See [AlleleDoser](https://github.com/HautaniemiLab/AlleleDoser) for upstream computation.
+
+##### **Example File Format (`chr8_ALTlr.csv`):**
 
 | ID                | sample1 | sample2 | sample3 |
 |-------------------|---------|---------|---------|
-| chr8:123456:A:G   | 0.32    | 0.45    | 0.10    |
-| chr8:123789:T:C   | 0.76    | 0.88    | 0.34    |
-| chr8:124000:G:T   | 0.00    | 0.05    | 0.50    |
+| chr8:123456:A:G   | 1.85    | 2.10    | 0.40    |
+| chr8:123789:T:C   | 2.00    | 1.95    | 1.20    |
+
+`chr8_REFlr.csv` has the identical `ID` column with the corresponding REFlr values.
 
 ---
 
@@ -128,13 +190,12 @@ The `--quantifications` argument should point to a CSV file containing normalize
 | chr8   | 123000  | 124000  | ENSG00000123  | 1.21    | 0.98    | 1.34    |
 | chr8   | 130000  | 132000  | ENSG00000456  | 0.87    | 1.05    | 0.92    |
 
-**Note**: Provide quantifications for the **entire genome**, even if only one chromosome is analyzed at a time. This ensures correct permutation testing and FDR correction.
 
 ---
 
 #### 3. Covariate File (CSV)
 
-The `--covariates` argument should point to a CSV file containing covariate values for each sample. First row has `n` entries (samples); subsequent rows have `n + 1` entries (covariate name + values).
+The `--covariates` argument should point to a CSV file containing sample-level covariate values. First row has `n` entries (samples); subsequent rows have `n + 1` entries (covariate name + values).
 
 ##### **Structure:**
 - **Row 1**: Sample IDs only (e.g., `sample1,sample2,sample3`)
@@ -144,7 +205,7 @@ The `--covariates` argument should point to a CSV file containing covariate valu
 
 #### 4. Copy Number File (CSV)
 
-The `--copynumber` argument should point to a CSV file containing phenotype-level copy number values for each sample.
+The `--copynumber` argument should point to a CSV file containing phenotype-level copy number values (CNlr) for each sample.
 
 ##### **Required Columns:**
 - **`gene_id`**: Ensembl gene ID or equivalent identifier.
@@ -179,98 +240,108 @@ The `--segmentation` argument should point to a CSV file with structural segment
 | sample1  | chr8  | 200001   | 300000  |
 | sample2  | chr8  | 120000   | 250000  |
 
- 
+---
+
+#### 6. Phenotype-Level Covariate File (CSV, optional)
+
+The optional `--phenotype_covariate` argument points to a CSV with one phenotype-level covariate per sample (same layout as the copy number file). When provided, it is included as an unpenalised predictor in `finemap` and `validate`.
+
 ## Output Format
 
-The primary output file of SegmentQTL is a CSV containing gene-variant associations.
+### Nominal / Permutation Output
 
-### Output Columns
+The primary output of `nominal` / `perm` modes is a CSV with per-(phenotype, variant) statistics.
 
-| Column Name          | Description                                                                            |
-|----------------------|----------------------------------------------------------------------------------------|
-| `phenotype`          | Phenotype identifier.                                                                  |
-| `variant`            | Variant identifier.                                                                    |
-| `number_of_samples`  | Effective number of samples used in the association test after the segment filtering.  |
-| `slope`              | Estimated regression coefficient (effect size) for the genotype–phenotype association. |
-| `slope_se`           | Standard error of the slope estimate.                                                  |
-| `nominal_p`          | P-value from the nominal association test.                                             |
-| `p_adj`              | Permutation adjusted p-value.                                                          |
-| `chr`                | Chromosome where the gene and variant are located.                                     |
-| `fdr`                | FDR corrected p-value.                                                                 |
+| Column Name          | Description                                                                                |
+|----------------------|--------------------------------------------------------------------------------------------|
+| `phenotype`          | Phenotype identifier.                                                                      |
+| `variant`            | Variant identifier (best variant per phenotype in `perm` mode).                            |
+| `number_of_samples`  | Effective number of samples after segment-consistency filtering.                           |
+| `beta_s`             | Slope on the sum `s = REFlr + ALTlr` (allelic-burden / dosage covariate).                  |
+| `se_s`               | Standard error of `beta_s`.                                                                |
+| `beta_d`             | Slope on the contrast `d = REFlr − ALTlr` (allele-specific effect of interest).            |
+| `se_d`               | Standard error of `beta_d`.                                                                |
+| `t_stat_d`           | t-statistic for `beta_d`.                                                                  |
+| `nominal_p`          | Nominal p-value for `beta_d`.                                                              |
+| `r2_alt`             | R² of the alternative model.                                                               |
+| `p_adj`              | Permutation-adjusted p-value (`perm` mode only; NaN in `nominal`).                         |
+| `chr`                | Chromosome.                                                                                |
 
+When `--record_aic` is set, additional columns `aic_null`, `aic_alt`, `delta_aic_alt_minus_null` are written.
 
----
+### Finemapping Output
+
+`finemap` mode writes `finemap_<chr>.csv` with one row per (phenotype, selected variant). Key columns include `phenotype`, `variant`, `n_samples`, `n_variants`, `mean_d`, `sd_d`, `stability_score`, `mean_beta`, `sign_consistency`, `lambda_selected`, `beta_full` (refit Elastic Net coefficient on standardised `d`), `beta_full_raw` (back-transformed to raw `d`), `beta_cnlr`, and `effect_interpretation`. A companion `finemap_bootstrap_nonzero_<chr>.csv` records per-bootstrap selections, and `finemap_r2_<chr>.csv` is written when `--compute_r2` is set.
+
+### Validation Output
+
+`validate` mode writes three files: `validate_<chr>.csv` (per-phenotype generalization metrics), `validate_residuals_<chr>.csv` (per-(phenotype, validation sample) predictions and residuals), and `validate_model_<chr>.csv` (long-format model audit; only when `--save_model_audit` is set). Metrics include RMSE/MAE, descriptive R², calibration (intercept + slope with HC3 robust Wald test), genetic transfer slope rho, burden-stratified R², and optional bootstrap and permutation p-values.
 
 ## Examples
 
-These examples assume you're in the root of the `SegmentQTL` folder.
-
-First, unzip the provided mock dataset:
-
-```bash
-unzip mock.zip
-```
+These examples assume your inputs follow the layout described above and that you are at the root of the `SegmentQTL` folder.
 
 ### 1. Nominal Mapping
-Run a nominal association test for chromosome 8 using 4 CPU cores:
+Per-variant nominal association testing on chromosome 8 with 4 cores:
 
 ```bash
 python -m segmentqtl --mode nominal --chromosome 8 --num_cores 4 \
-    --genotypes mock/genotypes --quantifications mock/quantifications.csv \
-    --covariates mock/covariates.csv --copynumber mock/copynumbers.csv \
-    --segmentation mock/segments.csv --out_dir results/
+    --genotypes data/genotypes --quantifications data/quantifications.csv \
+    --covariates data/covariates.csv --copynumber data/copynumbers.csv \
+    --segmentation data/segments.csv --out_dir results/
 ```
 
 ### 2. Permutation-Based Mapping
-Perform 25 permutations using the beta approximation method:
+Gene-level scan with 1000 permutations using the beta approximation:
 
 ```bash
-python -m segmentqtl --mode perm --chromosome 8 --num_permutations 25 \
+python -m segmentqtl --mode perm --chromosome 8 --num_permutations 1000 \
     --perm_method beta --num_cores 4 \
-    --genotypes mock/genotypes --quantifications mock/quantifications.csv \
-    --covariates mock/covariates.csv --copynumber mock/copynumbers.csv \
-    --segmentation mock/segments.csv --out_dir results/
+    --genotypes data/genotypes --quantifications data/quantifications.csv \
+    --covariates data/covariates.csv --copynumber data/copynumbers.csv \
+    --segmentation data/segments.csv --out_dir results/
 ```
-Note that number of permutations should not exceed the number of phenotypes in the full dataset.
 
-### 3. FDR Correction
-
-Apply false discovery rate (FDR) correction to previously computed results:
+### 3. Finemapping
+Joint Elastic Net finemapping with stability selection on chromosome 8:
 
 ```bash
-python -m segmentqtl --mode fdr --out_dir results/ --fdr_out corrected_results.csv
+python -m segmentqtl --mode finemap --chromosome 8 --num_cores 4 \
+    --genotypes data/genotypes --quantifications data/quantifications.csv \
+    --covariates data/covariates.csv --copynumber data/copynumbers.csv \
+    --segmentation data/segments.csv \
+    --n_bootstrap 200 --compute_r2 --out_dir results/
 ```
 
-### 4. Testing All Variants for a Specific Phenotype
+### 4. Validation on an Independent Cohort
+Reuse a prior finemap run and validate on a held-out cohort, restricting scoring to discovery-supported phenotypes:
 
-Run SegmentQTL for all variants of a given phenotype id:
+```bash
+python -m segmentqtl --mode validate --chromosome 8 --num_cores 4 \
+    --genotypes data/genotypes --quantifications data/quantifications.csv \
+    --covariates data/covariates.csv --copynumber data/copynumbers.csv \
+    --segmentation data/segments.csv \
+    --val_genotypes valdata/genotypes --val_quantifications valdata/quantifications.csv \
+    --val_covariates valdata/covariates.csv --val_copynumber valdata/copynumbers.csv \
+    --val_segmentation valdata/segments.csv \
+    --finemap_results_dir results/ \
+    --restrict_to_supported_phenotypes --support_min_stability 0.6 \
+    --out_dir validation_results/
+```
+
+### 5. Testing All Variants for a Specific Phenotype
+Run all applicable variants for one phenotype:
 
 ```bash
 python -m segmentqtl --mode nominal --all_variants ENSG00000003987 \
     --chromosome 8 --num_cores 1 \
-    --genotypes mock/genotypes --quantifications mock/quantifications.csv \
-    --covariates mock/covariates.csv --copynumber mock/copynumbers.csv \
-    --segmentation mock/segments.csv --out_dir results/
-```
-
-### 5. Generating QTL Plots
-
-Generate QTL plots for all tested phenotypes:
-
-```bash
-python -m segmentqtl --mode perm --plot_threshold 1 --plot_dir plots/ \
-    --chromosome 8 --num_cores 4 --num_permutations 25 \
-    --genotypes mock/genotypes --quantifications mock/quantifications.csv \
-    --covariates mock/covariates.csv --copynumber mock/copynumbers.csv \
-    --segmentation mock/segments.csv --out_dir results/
+    --genotypes data/genotypes --quantifications data/quantifications.csv \
+    --covariates data/covariates.csv --copynumber data/copynumbers.csv \
+    --segmentation data/segments.csv --out_dir results/
 ```
 
 ## Citation
 
 If you use SegmentQTL in your work, please cite:
 
-Samuel Leppiniemi, et al. *SegmentQTL: Identifying genetic variants influencing molecular phenotypes in copy number-driven cancers.* bioRxiv, 2025. [https://doi.org/10.1101/2025.07.28.667150 ](https://doi.org/10.1101/2025.07.28.667150 )
-
-
-
-
+Samuel Leppiniemi, et al. *SegmentQTL: Identifying genetic variants influencing molecular phenotypes in copy number-driven cancers.* bioRxiv, 2025. [https://doi.org/10.1101/2025.07.28.667150](https://doi.org/10.1101/2025.07.28.667150)

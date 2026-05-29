@@ -1,48 +1,82 @@
 from multiprocessing import Pool
 from os import path
 from time import time
+from typing import Optional
 
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from .plotting_utils import box_and_whisker
+from .segment_utils import (
+    filter_variants_to_common_segment,
+    phenotype_window_bounds,
+    variants_in_window,
+)
 from .statistical_utils import (
-    adjust_p_values,
-    calculate_pvalue,
-    calculate_slope_and_se,
-    residualize,
+    check_d_variance,
+    fit_ols_and_test,
+)
+from .statistical_utils import (
+    gene_variant_regressions as run_gene_variant_regressions,
+)
+from .statistical_utils import (
+    gene_variant_regressions_permutations as run_gene_variant_regressions_permutations,
 )
 
 
 class Cis:
+    # Chromosome ordering for trans negative control (chr+1, wrapping)
+    _CHROMOSOMES = [f"chr{i}" for i in range(1, 23)] + ["chrX"]
+
     def __init__(
         self,
         chromosome,
         mode,
-        copynumber,
+        phenotype_covariate,
+        perm_covariate,
         quantifications,
         covariates,
         segmentation,
-        genotype,
+        genotype_alt,
+        genotype_ref,
         all_variants_mode,
         perm_method,
         num_permutations,
         window,
         num_cores,
-        plot_threshold,
-        plot_dir,
+        record_aic,
+        neg_control=False,
+        neg_control_max_variants=2000,
+        genotypes_dir=None,
     ):
         self.chromosome = chromosome
 
-        self.copy_number_df = self.load_and_validate_file(copynumber, index_col=0)
+        # Load phenotype-level covariate (optional)
+        if phenotype_covariate is not None:
+            self.phenotype_covariate_df = self.load_and_validate_file(
+                phenotype_covariate, index_col=0
+            )
+        else:
+            self.phenotype_covariate_df = None
+
+        # Load permutation-only covariate (optional, for FL residualization)
+        if perm_covariate is not None:
+            self.perm_covariate_df = self.load_and_validate_file(
+                perm_covariate, index_col=0
+            )
+        else:
+            self.perm_covariate_df = None
 
         self.full_quan = self.load_and_validate_file(quantifications, index_col=3)
         self.quan = self.full_quan[self.full_quan["chr"] == self.chromosome]
 
         self.samples = self.quan.columns.to_numpy()[3:]
 
-        self.cov = self.load_and_validate_file(covariates, index_col=None)
+        # Load sample-level covariates (optional)
+        if covariates is not None:
+            self.cov = self.load_and_validate_file(covariates, index_col=None)
+        else:
+            self.cov = None
 
         self.segmentation = self.load_and_validate_file(segmentation, index_col=0)
         self.segmentation = self.segmentation[self.segmentation.chr == self.chromosome]
@@ -50,9 +84,35 @@ class Cis:
             self.segmentation.index.isin(self.samples)
         ]
 
-        self.genotype = self.load_and_validate_file(genotype, index_col=0)
-        self.genotype = self.genotype.loc[:, self.genotype.columns.isin(self.samples)]
-        self.genotype = self.genotype[self.samples]
+        # Load both genotype matrices
+        self.geno_alt = self.load_and_validate_file(genotype_alt, index_col=0)
+        self.geno_alt = self.geno_alt.loc[:, self.geno_alt.columns.isin(self.samples)]
+        self.geno_alt = self.geno_alt[self.samples]
+
+        self.geno_ref = self.load_and_validate_file(genotype_ref, index_col=0)
+        self.geno_ref = self.geno_ref.loc[:, self.geno_ref.columns.isin(self.samples)]
+        self.geno_ref = self.geno_ref[self.samples]
+
+        # Ensure both genotype matrices have same variants and samples (aligned)
+        common_variants = self.geno_alt.index.intersection(self.geno_ref.index)
+        self.geno_alt = self.geno_alt.loc[common_variants]
+        self.geno_ref = self.geno_ref.loc[common_variants]
+
+        # Reindex phenotype-level covariates to self.samples for alignment
+        if self.phenotype_covariate_df is not None:
+            self.phenotype_covariate_df = self.phenotype_covariate_df.loc[
+                :, self.phenotype_covariate_df.columns.isin(self.samples)
+            ][self.samples]
+        if self.perm_covariate_df is not None:
+            self.perm_covariate_df = self.perm_covariate_df.loc[
+                :, self.perm_covariate_df.columns.isin(self.samples)
+            ][self.samples]
+
+        # Precompute variant positions once as NumPy array
+        variant_index_array = self.geno_alt.index.astype(str).to_numpy()
+        self.variant_positions = np.fromiter(
+            (int(s.split(":")[1]) for s in variant_index_array), dtype=np.int64
+        )
 
         if isinstance(all_variants_mode, str):
             # Check if the gene ID given with --all_variants exists in quantification df
@@ -76,15 +136,53 @@ class Cis:
                 f"Invalid perm_method selected: '{perm_method}'. Please select beta or direct."
             )
 
-        self.plot_threshold = plot_threshold
-        self.plot_dir = plot_dir
+        self.record_aic = record_aic
 
         if mode == "nominal":
             self.num_permutations = 0
         else:
             self.num_permutations = num_permutations
 
-    def load_and_validate_file(self, file_path: str, index_col: int):
+        # ── Negative control mode ──
+        self.neg_control = neg_control
+        self.neg_control_max_variants = neg_control_max_variants
+
+        if neg_control:
+            if genotypes_dir is None:
+                raise ValueError(
+                    "--genotypes directory path is required for trans negative control mode."
+                )
+            trans_chr = self._get_trans_chromosome(chromosome)
+            print(
+                f"[neg_control] Gene chromosome: {chromosome} → variant chromosome: {trans_chr}"
+            )
+            print(
+                "[neg_control] Segment consistency filtering is not applied "
+                "(not meaningful across chromosomes)."
+            )
+            trans_alt_file = f"{genotypes_dir}/{trans_chr}_ALTlr.csv"
+            trans_ref_file = f"{genotypes_dir}/{trans_chr}_REFlr.csv"
+
+            self.neg_geno_alt = self.load_and_validate_file(trans_alt_file, index_col=0)
+            self.neg_geno_alt = self.neg_geno_alt.loc[
+                :, self.neg_geno_alt.columns.isin(self.samples)
+            ]
+            self.neg_geno_alt = self.neg_geno_alt[self.samples]
+
+            self.neg_geno_ref = self.load_and_validate_file(trans_ref_file, index_col=0)
+            self.neg_geno_ref = self.neg_geno_ref.loc[
+                :, self.neg_geno_ref.columns.isin(self.samples)
+            ]
+            self.neg_geno_ref = self.neg_geno_ref[self.samples]
+
+            # Align to common variant set
+            common_neg = self.neg_geno_alt.index.intersection(self.neg_geno_ref.index)
+            self.neg_geno_alt = self.neg_geno_alt.loc[common_neg]
+            self.neg_geno_ref = self.neg_geno_ref.loc[common_neg]
+
+            print(f"[neg_control] Loaded {len(common_neg)} variants from {trans_chr}")
+
+    def load_and_validate_file(self, file_path: str, index_col: Optional[int]):
         """
         Load a CSV file and validate its existence and content.
 
@@ -118,8 +216,11 @@ class Cis:
         Returns:
         - Tuple of window_start and window_end, which define the start and end positions of the window
         """
-        window_start = self.quan["start"].iloc[gene_index] - self.window
-        window_end = self.quan["end"].iloc[gene_index] + self.window
+        window_start, window_end = phenotype_window_bounds(
+            self.quan,
+            gene_index,
+            self.window,
+        )
         return [window_start, window_end]
 
     def get_variants_for_gene_window(self, current_start: int, current_end: int):
@@ -131,18 +232,70 @@ class Cis:
         - current_end: End position of a window
 
         Returns:
-        - variants: Subset of genotype dataframe that contains only those variants that are inside
-            the given window
+        - variants_alt: Subset of ALT genotype dataframe that contains only those variants
+            that are inside the given window
+        - variants_ref: Subset of REF genotype dataframe that contains only those variants
+            that are inside the given window
         """
-        positions = self.genotype.index.str.extract(
-            r"chr(?:[1-9]|1[0-9]|2[0-2]|X):(\d+):", expand=False
-        ).astype(int)
-        subset_condition = (positions > current_start) & (positions < current_end)
-        variants = self.genotype.loc[subset_condition]
-        return variants
+        return variants_in_window(
+            self.geno_alt,
+            self.geno_ref,
+            self.variant_positions,
+            current_start,
+            current_end,
+        )
+
+    # ── Negative control helpers ──────────────────────────────────────────
+
+    @classmethod
+    def _get_trans_chromosome(cls, chromosome: str) -> str:
+        """Return the next chromosome in the ordering (wraps around)."""
+        if chromosome in cls._CHROMOSOMES:
+            idx = cls._CHROMOSOMES.index(chromosome)
+            return cls._CHROMOSOMES[(idx + 1) % len(cls._CHROMOSOMES)]
+        raise ValueError(
+            f"Unknown chromosome '{chromosome}' for trans negative control. "
+            f"Expected one of {cls._CHROMOSOMES}."
+        )
+
+    def _subsample_variants(
+        self,
+        variants_alt: pd.DataFrame,
+        variants_ref: pd.DataFrame,
+        gene_index: int,
+    ):
+        """Randomly subsample to at most neg_control_max_variants (reproducible per gene)."""
+        n_total = len(variants_alt)
+        if n_total <= self.neg_control_max_variants:
+            return variants_alt, variants_ref
+        rng = np.random.default_rng(seed=42 + gene_index)
+        idx = np.sort(rng.choice(n_total, self.neg_control_max_variants, replace=False))
+        return variants_alt.iloc[idx], variants_ref.iloc[idx]
+
+    def get_neg_control_variants(self, gene_index: int):
+        """
+        Fetch trans negative-control variants for a gene.
+
+        Returns subsampled variants from the next chromosome. These have no
+        plausible cis-regulatory relationship to the gene, making them a pure
+        null for checking pipeline calibration.
+
+        Returns:
+        - variants_alt, variants_ref: DataFrames of (subsampled) trans genotypes
+        """
+        if len(self.neg_geno_alt) == 0:
+            return pd.DataFrame(), pd.DataFrame()
+        return self._subsample_variants(
+            self.neg_geno_alt, self.neg_geno_ref, gene_index
+        )
 
     def gene_variants_common_segment(
-        self, start: int, end: int, variants: pd.DataFrame
+        self,
+        start: int,
+        end: int,
+        variants_alt: pd.DataFrame,
+        variants_ref: pd.DataFrame,
+        variant_pos: np.ndarray,
     ):
         """
         Filter variants to ensure that the gene and variants that are in the same
@@ -151,431 +304,383 @@ class Cis:
         Parameters:
         - start: Start position of a window
         - end: End position of a window
-        - variants: Subset of genotype file. Only variants that are in the same window as
-            the gene of interest
+        - variants_alt: Subset of ALT genotype file. Only variants that are in the same window
+            as the gene of interest
+        - variants_ref: Subset of REF genotype file. Only variants that are in the same window
+            as the gene of interest
+        - variant_pos: Precomputed variant positions (sliced from self.variant_positions)
 
         Returns:
-        - variants: Subset of genotype dataframe that is filtered and masked by segmentation and window.
+        - variants_alt, variants_ref: Filtered and masked subsets of genotype dataframes.
         """
-        start += self.window
-        end -= self.window
-
-        index_array = variants.index.astype(str).to_numpy()
-        variant_pos = [int(index.split(":")[1]) for index in index_array]
-
-        for cur_sample in variants.columns:
-            cur_seg = self.segmentation.loc[
-                (self.segmentation.index == cur_sample)
-                & (self.segmentation["startpos"] <= start)
-                & (self.segmentation["endpos"] >= start)
-            ]
-
-            # If the gene falls onto multiple segments, assign whole col to nan
-            if len(cur_seg) != 1:
-                variants = variants.assign(cur_sample=np.nan)
-                continue
-
-            # Find the lower and upper bounds for the current position
-            lower_bound = cur_seg["startpos"].to_numpy()[0]
-            upper_bound = cur_seg["endpos"].to_numpy()[0]
-
-            # Create mask for positions that are outside of the bounds to set them to nan
-            within_bounds = (variant_pos >= lower_bound) & (variant_pos <= upper_bound)
-            mask_cur_col = ~within_bounds
-
-            variants = variants.copy()
-            variants.loc[mask_cur_col, cur_sample] = np.nan
-
-        return variants
+        return filter_variants_to_common_segment(
+            self.segmentation,
+            self.window,
+            start,
+            end,
+            variants_alt,
+            variants_ref,
+            variant_pos,
+        )
 
     def gene_variant_regressions_permutations(
         self,
         gene_index: int,
-        transf_variants: pd.DataFrame,
+        transf_variants_alt: pd.DataFrame,
+        transf_variants_ref: pd.DataFrame,
         variant: str,
         regression_data: pd.DataFrame,
     ):
         """
-        Perform permutations to obtain adjusted p-values. In case of 0 permutations,
-        do only nominal pass.
-
-        Parameters:
-        - gene_index: Index of a gene of interest on the quantification file.
-        - transf_variants: Dataframe of transformed variants that are processed for
-            window and segmentation.
-        - variant: Variant id
-        - regression_data: Dataframe with current gene expression levels, genotypes,
-            and covariates
-
-        Returns:
-        - actual_associations: Dataframe of association testing results for a gene.
-            When > 0 permutations are used, also adjusted p-values are provided.
+        Perform association testing for the provided gene-variant regression_data and,
+        if enabled (mode=perm), compute a scan-level permutation-adjusted p-value.
         """
-        actual_associations = self.gene_variant_regressions(
-            gene_index, self.quan, variant, regression_data
+        return run_gene_variant_regressions_permutations(
+            gene_index=gene_index,
+            quantifications=self.quan,
+            variant=variant,
+            regression_data=regression_data,
+            transf_variants_alt=transf_variants_alt,
+            transf_variants_ref=transf_variants_ref,
+            phenotype_covariate_df=self.phenotype_covariate_df,
+            perm_covariate_df=self.perm_covariate_df,
+            cov=self.cov,
+            num_permutations=self.num_permutations,
+            perm_method=self.perm_method,
+            record_aic=self.record_aic,
         )
-
-        if self.num_permutations == 0:
-            return actual_associations
-
-        if regression_data.shape[0] == 0:
-            actual_associations["p_adj"] = np.nan
-            return actual_associations
-
-        nom_gex, nom_genotypes = residualize(regression_data)
-
-        nominal_r = np.corrcoef(
-            nom_gex,
-            nom_genotypes,
-        )[0, 1]
-
-        if self.perm_method == "beta":
-            perm_indices = np.random.choice(
-                range(self.full_quan.shape[0]), self.num_permutations, replace=False
-            )
-
-            r2_perm = np.zeros(self.num_permutations)
-
-            for index in range(self.num_permutations):
-                # Perform association testing with the permuted gene index
-                perm_data = self.permutation_data(
-                    gene_index, perm_indices[index], transf_variants, variant
-                )
-
-                perm_gex, perm_genotypes = residualize(perm_data)
-
-                r_perm = np.corrcoef(perm_gex, perm_genotypes)[0, 1]
-
-                r2_perm[index] = r_perm**2
-
-            nominal_r2 = np.power(nominal_r, 2)
-
-            # Adjust p-values using beta approximation
-            adjusted_p_value = adjust_p_values(r2_perm, nominal_r2)
-
-        else:
-            permuted_correlations = []
-
-            # In direct scheme, permute the whole dataset
-            for index in range(self.full_quan.shape[0]):
-                perm_data = self.permutation_data(
-                    gene_index, perm_indices[index], transf_variants, variant
-                )
-
-                perm_gex, perm_genotypes = residualize(perm_data)
-
-                perm_corr = np.corrcoef(perm_gex, perm_genotypes)[0, 1]
-                permuted_correlations.append(perm_corr)
-
-            nominal_r = np.corrcoef(
-                regression_data["GEX"],
-                regression_data["cur_genotypes"],
-            )[0, 1]
-
-            permuted_correlations = np.array(permuted_correlations)
-            adjusted_p_value = (
-                np.sum(np.abs(permuted_correlations) > np.abs(nominal_r))
-                / self.full_quan.shape[0]
-            )
-
-        # Add adjusted p-values to actual associations
-        actual_associations["p_adj"] = adjusted_p_value
-
-        return actual_associations
-
-    def permutation_data(
-        self,
-        gene_index: int,
-        perm_index: int,
-        transf_variants: pd.DataFrame,
-        variant: str,
-    ):
-        """
-        Find data for association testing for permutations. In this case all
-        dependent variable values are fixed, only the phenotype levels are
-        permuted.
-
-        Parameters:
-        - gene_index: Index of the actual gene on the quantification file.
-        - perm_index: Index of a gene on the quantification file that is used for permutation.
-        - transf_variants: Dataframe of transformed variants that are processed for
-            window and segmentation.
-        - variant: Variant ID
-
-        Returns:
-        - perm_gex, perm_genotypes: Arrays of residualized permuted phenotype levels
-            and residualized fixed genotype values
-        """
-        if not variant:
-            return pd.DataFrame()
-
-        # Gene expression levels from the perm index
-        GEX = pd.to_numeric(
-            self.full_quan.iloc[perm_index, 3:], errors="coerce"
-        ).to_numpy()
-
-        current_gene = self.quan.index[gene_index]
-        CN = self.copy_number_df.loc[current_gene].to_numpy().flatten()
-        cov_values = [
-            pd.to_numeric(self.cov.loc[covariate], errors="coerce").to_numpy().flatten()
-            for covariate in self.cov.index
-        ]
-
-        cur_genotypes = transf_variants.loc[variant]
-
-        GEX_filtered, CN_filtered, cur_genotypes_filtered, cov_values_filtered = (
-            self.filter_arrays(GEX, CN, cur_genotypes, cov_values)
-        )
-
-        if not any(GEX_filtered):
-            return pd.DataFrame()
-
-        data_dict = {
-            "GEX": GEX_filtered,
-            "CN": CN_filtered,
-            "cur_genotypes": cur_genotypes_filtered,
-        }
-
-        for covariate, cov_value_filtered in zip(self.cov.index, cov_values_filtered):
-            data_dict[covariate] = cov_value_filtered
-
-        perm_data = pd.DataFrame(data_dict)
-
-        return perm_data
-
-    def check_grouping(self, cur_genotypes_filtered: np.ndarray):
-        """
-        Find if the genotype dosages have adequate variation in the data.
-
-        Parameters:
-        - cur_genotypes_filtered: Array of genotype dosages
-
-        Returns:
-        - Boolean value showing if there are enough instances in the different genotype groups.
-        """
-        bins = [-0.01, 0.34, 0.67, 1]
-        genotype_groups = pd.cut(cur_genotypes_filtered, bins=bins, include_lowest=True)
-        group_counts = genotype_groups.value_counts()
-
-        threshold = 10  # Minimum number of group members
-
-        # Check if at least two groups exceed the threshold
-        groups_exceeding_threshold = (group_counts > threshold).sum()
-
-        if groups_exceeding_threshold < 2:
-            return False
-
-        return True
 
     def filter_arrays(
         self,
         GEX: np.ndarray,
-        CN: np.ndarray,
-        cur_genotypes: np.ndarray,
-        cov_values: np.ndarray,
+        altlr: np.ndarray,
+        reflr: np.ndarray,
+        phenotype_cov: Optional[np.ndarray],
+        cov_values: list,
     ):
         """
         Filter data arrays and do validity checks.
 
+        For s/d parameterization, we check that d = REFlr - ALTlr has variance
+        (this is the allelic difference we're testing).
+
         Parameters:
-        - GEX: Gene expression levels
-        - CN: Gene copy numbers
-        - cur_genotypes: Genotype dosages
-        - cov_values: All other covariate values
-        - group_check: Whether to check representation of values in the middle
-            and in the tails in genotypes
+        - GEX: Phenotype levels
+        - altlr: ALTlr genotype values
+        - reflr: REFlr genotype values
+        - phenotype_cov: Phenotype-level covariate (None if not provided)
+        - cov_values: Sample-level covariate values
 
         Returns:
         Tuple of:
-        - GEX_filtered: Filtered gene expression values
-        - CN_filtered: Filtered copy numbers
-        - cur_genotypes_filtered: Filtered genotypes dosages
-        - cov_values_filtered: Filtered covariate values
+        - GEX_filtered: Filtered phenotype values
+        - altlr_filtered: Filtered ALTlr values
+        - reflr_filtered: Filtered REFlr values
+        - phenotype_cov_filtered: Filtered phenotype-level covariate (or None)
+        - cov_values_filtered: Filtered sample-level covariate values
         """
         # Check for shape mismatch
-        lengths = [len(GEX), len(CN), len(cur_genotypes)] + [
+        lengths = [len(GEX), len(altlr), len(reflr)] + [
             len(cov_value) for cov_value in cov_values
         ]
+        if phenotype_cov is not None:
+            lengths.append(len(phenotype_cov))
+
         if len(set(lengths)) != 1:
-            return [], [], [], []
+            _empty = np.array([])
+            return _empty, _empty, _empty, None, []
 
         # Filter out rows with NaNs in any of the required columns
-        mask = ~np.isnan(GEX) & ~np.isnan(CN) & ~np.isnan(cur_genotypes)
+        mask = ~np.isnan(GEX) & ~np.isnan(altlr) & ~np.isnan(reflr)
+
+        if phenotype_cov is not None:
+            mask &= ~np.isnan(phenotype_cov)
+
         for cov_value in cov_values:
             mask &= ~np.isnan(cov_value)
 
         if np.sum(mask) < 30:  # If less than 30 valid rows, skip this variant
-            return [], [], [], []
+            _empty = np.array([])
+            return _empty, _empty, _empty, None, []
 
         GEX_filtered = GEX[mask]
-        CN_filtered = CN[mask]
-        cur_genotypes_filtered = cur_genotypes[mask]
+        altlr_filtered = altlr[mask]
+        reflr_filtered = reflr[mask]
+        phenotype_cov_filtered = (
+            phenotype_cov[mask] if phenotype_cov is not None else None
+        )
         cov_values_filtered = [cov_value[mask] for cov_value in cov_values]
 
-        # Ensure each column has more than one unique value
-        if (
-            len(np.unique(GEX_filtered)) < 2
-            or len(np.unique(CN_filtered)) < 2
-            or len(np.unique(cur_genotypes_filtered)) < 2
-        ):
-            return [], [], [], []
+        # Ensure GEX has variance
+        if len(np.unique(GEX_filtered)) < 2:
+            _empty = np.array([])
+            return _empty, _empty, _empty, None, []
 
-        if not self.check_grouping(cur_genotypes_filtered):
-            return [], [], [], []
+        # Check that d = REFlr - ALTlr has variance (this is what we're testing)
+        d_filtered = reflr_filtered - altlr_filtered
+        if not check_d_variance(d_filtered):
+            _empty = np.array([])
+            return _empty, _empty, _empty, None, []
 
-        return GEX_filtered, CN_filtered, cur_genotypes_filtered, cov_values_filtered
+        return (
+            GEX_filtered,
+            altlr_filtered,
+            reflr_filtered,
+            phenotype_cov_filtered,
+            cov_values_filtered,
+        )
 
     def best_variant_data(
         self,
         gene_index: int,
-        transf_variants: pd.DataFrame,
+        transf_variants_alt: pd.DataFrame,
+        transf_variants_ref: pd.DataFrame,
         quantifications: pd.DataFrame,
     ):
         """
-        Find variant and linked data for a gene that has strongest Pearson
-        correlation with the independent variable.
+        Find variant and linked data for a gene that has strongest test statistic.
+
+        Uses s/d parameterization:
+        - s = REFlr + ALTlr (total dosage, included in null model)
+        - d = REFlr - ALTlr (allelic difference, the test predictor)
+
+        Selects variant with largest |t_d| (1-df t-test on d coefficient).
 
         Parameters:
         - gene_index: Index of a gene of interest on the quantification file.
-        - transf_variants: Dataframe of transformed variants that are processed for
-            window and segmentation.
+        - transf_variants_alt: Dataframe of transformed ALTlr variants
+        - transf_variants_ref: Dataframe of transformed REFlr variants
         - quantifications: Dataframe of quantifications.
 
         Returns:
-        - best_variant: Id of the variant with strongest correlation
-        - data_best_corr: Dataframe of data linked with the chosen variant
+        - best_variant: Id of the variant with strongest test statistic
+        - data_best: Dataframe of data linked with the chosen variant
         """
         current_gene = quantifications.index[gene_index]
         GEX = pd.to_numeric(
             quantifications.iloc[gene_index, 3:], errors="coerce"
         ).to_numpy()
-        CN = self.copy_number_df.loc[current_gene].to_numpy().flatten()
 
-        cov_values = [
-            pd.to_numeric(self.cov.loc[covariate], errors="coerce").to_numpy().flatten()
-            for covariate in self.cov.index
-        ]
+        # In perm mode, exclude samples with missing perm_cov so the nominal
+        # best-variant scan uses the same sample set as the permutation null.
+        # perm_cov is NOT added as a predictor — only used to define the mask.
+        if self.num_permutations > 0 and self.perm_covariate_df is not None:
+            perm_cov = (
+                self.perm_covariate_df.loc[current_gene]
+                .to_numpy()
+                .flatten()
+                .astype(float)
+            )
+            GEX[np.isnan(perm_cov)] = np.nan
 
-        best_corr = 0
-        data_best_corr = pd.DataFrame()
-        best_variant = ""
-
-        for variant_index, cur_genotypes in zip(
-            transf_variants.index, transf_variants.to_numpy()
-        ):
-            GEX_filtered, CN_filtered, cur_genotypes_filtered, cov_values_filtered = (
-                self.filter_arrays(GEX, CN, cur_genotypes, cov_values)
+        # Get phenotype-level covariate if available
+        phenotype_cov = None
+        if self.phenotype_covariate_df is not None:
+            phenotype_cov = (
+                self.phenotype_covariate_df.loc[current_gene].to_numpy().flatten()
             )
 
-            if not any(GEX_filtered):
+        cov_values = []
+        if self.cov is not None:
+            cov_values = [
+                pd.to_numeric(self.cov.loc[covariate], errors="coerce")
+                .to_numpy()
+                .flatten()
+                for covariate in self.cov.index
+            ]
+
+        best_abs_t = -np.inf
+        data_best = pd.DataFrame()
+        best_variant = ""
+
+        for variant_index in transf_variants_alt.index:
+            altlr = transf_variants_alt.loc[variant_index].to_numpy()
+            reflr = transf_variants_ref.loc[variant_index].to_numpy()
+
+            (
+                GEX_filtered,
+                altlr_filtered,
+                reflr_filtered,
+                phenotype_cov_filtered,
+                cov_values_filtered,
+            ) = self.filter_arrays(GEX, altlr, reflr, phenotype_cov, cov_values)
+
+            if len(GEX_filtered) == 0:
                 continue
 
-            # Calculate Pearson correlation
-            corr = np.corrcoef(GEX_filtered, cur_genotypes_filtered)[0, 1]
+            # Compute s and d
+            s = reflr_filtered + altlr_filtered
+            d = reflr_filtered - altlr_filtered
+            n = len(GEX_filtered)
 
-            if np.abs(corr) > np.abs(best_corr):
+            # Build design matrices for 1-df t-test on d
+            y = GEX_filtered.astype(float)
+
+            # Null model: Phenotype ~ s + phenotype_cov + sample_covariates
+            cov_blocks = [s]
+            if phenotype_cov_filtered is not None:
+                cov_blocks.append(phenotype_cov_filtered)
+            cov_blocks.extend(cov_values_filtered)
+
+            X_null = np.column_stack(
+                [np.ones(n)] + [np.asarray(c, dtype=float) for c in cov_blocks]
+            )
+
+            # Alt model: adds d
+            X_alt = np.column_stack(
+                [np.ones(n), s, d]
+                + (
+                    [phenotype_cov_filtered]
+                    if phenotype_cov_filtered is not None
+                    else []
+                )
+                + [np.asarray(c, dtype=float) for c in cov_values_filtered]
+            )
+
+            result = fit_ols_and_test(y, X_null, X_alt)
+
+            # Extract t-statistic for d (index 2 in X_alt: intercept=0, s=1, d=2)
+            beta_d = result["beta_alt"][2]
+            se_d = result["se_alt"][2]
+
+            if se_d > 0 and np.isfinite(se_d):
+                t_stat = beta_d / se_d
+            else:
+                t_stat = np.nan
+
+            abs_t = np.abs(t_stat) if np.isfinite(t_stat) else -np.inf
+
+            if abs_t > best_abs_t:
+                best_abs_t = abs_t
+
+                # Build data dict for this variant (keeping ALTlr/REFlr for compatibility)
                 data_dict = {
                     "GEX": GEX_filtered,
-                    "CN": CN_filtered,
-                    "cur_genotypes": cur_genotypes_filtered,
+                    "ALTlr": altlr_filtered,
+                    "REFlr": reflr_filtered,
                 }
 
-                for covariate, cov_value_filtered in zip(
-                    self.cov.index, cov_values_filtered
-                ):
-                    data_dict[covariate] = cov_value_filtered
+                if phenotype_cov_filtered is not None:
+                    data_dict["phenotype_cov"] = phenotype_cov_filtered
 
-                best_corr = corr
-                data_best_corr = pd.DataFrame(data_dict)
+                if self.cov is not None:
+                    for covariate, cov_value_filtered in zip(
+                        self.cov.index, cov_values_filtered
+                    ):
+                        data_dict[covariate] = cov_value_filtered
+
+                data_best = pd.DataFrame(data_dict)
                 best_variant = variant_index
 
-        return best_variant, data_best_corr
+        return best_variant, data_best
 
     def data_all_variants(
         self,
         GEX: np.ndarray,
-        CN: np.ndarray,
-        cov_values: np.ndarray,
-        cur_genotypes: np.ndarray,
+        altlr: np.ndarray,
+        reflr: np.ndarray,
+        phenotype_cov: Optional[np.ndarray],
+        cov_values: list,
     ):
         """
         Process data for association testing when in all variants mode.
 
         Parameters:
-        - GEX: Gene expression levels.
-        - CN: Gene copy numbers
-        - cov_values: All other covariate values
-        - cur_genotypes: Genotype dosages
+        - GEX: Phenotype levels.
+        - altlr: ALTlr genotype values
+        - reflr: REFlr genotype values
+        - phenotype_cov: Phenotype-level covariate (None if not provided)
+        - cov_values: Sample-level covariate values
 
         Returns:
         - Dataframe of filtered regression data.
         """
-        GEX_filtered, CN_filtered, cur_genotypes_filtered, cov_values_filtered = (
-            self.filter_arrays(GEX, CN, cur_genotypes, cov_values)
-        )
+        (
+            GEX_filtered,
+            altlr_filtered,
+            reflr_filtered,
+            phenotype_cov_filtered,
+            cov_values_filtered,
+        ) = self.filter_arrays(GEX, altlr, reflr, phenotype_cov, cov_values)
 
-        if not any(GEX_filtered):
+        if len(GEX_filtered) == 0:
             return pd.DataFrame()
 
         data_dict = {
             "GEX": GEX_filtered,
-            "CN": CN_filtered,
-            "cur_genotypes": cur_genotypes_filtered,
+            "ALTlr": altlr_filtered,
+            "REFlr": reflr_filtered,
         }
 
-        for covariate, cov_value_filtered in zip(self.cov.index, cov_values_filtered):
-            data_dict[covariate] = cov_value_filtered
+        if phenotype_cov_filtered is not None:
+            data_dict["phenotype_cov"] = phenotype_cov_filtered
+
+        if self.cov is not None:
+            for covariate, cov_value_filtered in zip(
+                self.cov.index, cov_values_filtered
+            ):
+                data_dict[covariate] = cov_value_filtered
 
         df_data = pd.DataFrame(data_dict)
 
         return df_data
 
-    def process_all_variants(self, gene_index: int, transf_variants: pd.DataFrame):
+    def process_all_variants(
+        self,
+        gene_index: int,
+        transf_variants_alt: pd.DataFrame,
+        transf_variants_ref: pd.DataFrame,
+    ):
         """
         Conduct association testing for all variants in a window instead of selecting
         only best correlated variant. Construct regression data and then run the
         regressions.
 
+        Note: Permutation testing is skipped in all-variants mode.
+
         Parameters:
         - gene_index: Index of a gene of interest on the quantification file.
-        - transf_variants: Dataframe of transformed variants that are processed for
-            window and segmentation.
+        - transf_variants_alt: Dataframe of transformed ALTlr variants
+        - transf_variants_ref: Dataframe of transformed REFlr variants
 
         Returns:
-        - Dataframe with all association testing results for a gene.
+        - Dataframe with association testing results for all variants (nominal only, no p_adj).
         """
         current_gene = self.quan.index[gene_index]
         GEX = pd.to_numeric(self.quan.iloc[gene_index, 3:], errors="coerce").to_numpy()
-        CN = self.copy_number_df.loc[current_gene].to_numpy().flatten()
 
-        cov_values = [
-            pd.to_numeric(self.cov.loc[covariate], errors="coerce").to_numpy().flatten()
-            for covariate in self.cov.index
-        ]
+        phenotype_cov = None
+        if self.phenotype_covariate_df is not None:
+            phenotype_cov = (
+                self.phenotype_covariate_df.loc[current_gene].to_numpy().flatten()
+            )
+
+        cov_values = []
+        if self.cov is not None:
+            cov_values = [
+                pd.to_numeric(self.cov.loc[covariate], errors="coerce")
+                .to_numpy()
+                .flatten()
+                for covariate in self.cov.index
+            ]
 
         df_res_list = []
 
-        for variant_index, cur_genotypes in zip(
-            transf_variants.index, transf_variants.to_numpy()
-        ):
-            regression_data = self.data_all_variants(GEX, CN, cov_values, cur_genotypes)
-            perm_res = self.gene_variant_regressions_permutations(
-                gene_index, transf_variants, variant_index, regression_data
+        for variant_index in transf_variants_alt.index:
+            altlr = transf_variants_alt.loc[variant_index].to_numpy()
+            reflr = transf_variants_ref.loc[variant_index].to_numpy()
+
+            regression_data = self.data_all_variants(
+                GEX, altlr, reflr, phenotype_cov, cov_values
             )
-            df_res_list.append(perm_res)
 
-            if self.plot_threshold != -1:
-                p_value = -1
-                if (self.num_permutations) > 0:
-                    p_value = perm_res["p_adj"][0]
-                else:
-                    p_value = perm_res["nominal_p"][0]
-
-                if not np.isnan(p_value) and p_value < self.plot_threshold:
-                    gene_name = self.quan.index[gene_index]
-                    box_and_whisker(
-                        regression_data, gene_name, variant_index, self.plot_dir
-                    )
+            nominal_res = self.gene_variant_regressions(
+                gene_index,
+                self.quan,
+                variant_index,
+                regression_data,
+            )
+            df_res_list.append(nominal_res)
 
         return pd.concat(df_res_list, ignore_index=True)
 
@@ -587,61 +692,31 @@ class Cis:
         regression_data: pd.DataFrame,
     ):
         """
-        Find associations between the gene expression values of a gene and variants
-        by performing regressions. Using ordinary least square regression,
-        log-likelihood calculations, and likelihood ratio test to pinpoint the effect of genotypes.
+        Find associations between phenotype levels and variants using s/d parameterization.
+
+        Model: Phenotype ~ s + d + covariates
+        where s = REFlr + ALTlr (total dosage) and d = REFlr - ALTlr (allelic difference).
+
+        Test: H0: β_d = 0 (1-df t-test), which tests if the two alleles have different
+        effects on phenotype (i.e., molQTL signal).
 
         Parameters:
         - gene_index: Index of a gene of interest on the quantification file.
         - quantifications: Dataframe of quantifications.
         - variant: Variant ID
-        - regression_data: Regression data for current gene variant pair including covariates
+        - regression_data: Regression data for current gene-variant pair including ALTlr, REFlr,
+            optional phenotype_cov, and sample-level covariates
 
         Returns:
-        - associations dataframe with statistics of the strenghts of associations
+        - associations: Dataframe with statistics (beta_s, se_s, beta_d, se_d, nominal_p)
         """
-        associations = []
-        current_gene = quantifications.index[gene_index]
-
-        def create_association(gene, variant, slope, slope_se, p_value):
-            return {
-                "phenotype": gene,
-                "variant": variant,
-                "number_of_samples": regression_data.shape[0],
-                "slope": slope,
-                "slope_se": slope_se,
-                "nominal_p": p_value,
-            }
-
-        if len(regression_data) == 0:
-            associations.append(
-                create_association(current_gene, variant, np.nan, np.nan, np.nan)
-            )
-            return pd.DataFrame(associations)
-
-        residualized_gex, residualized_genotypes = residualize(regression_data)
-
-        residualized_regression_data = pd.DataFrame(
-            {
-                "GEX": residualized_gex,
-                "cur_genotypes": residualized_genotypes,
-            }
+        return run_gene_variant_regressions(
+            gene_index=gene_index,
+            quantifications=quantifications,
+            variant=variant,
+            regression_data=regression_data,
+            record_aic=self.record_aic,
         )
-
-        corr = np.corrcoef(
-            residualized_regression_data["GEX"],
-            residualized_regression_data["cur_genotypes"],
-        )[0, 1]
-
-        slope, slope_se = calculate_slope_and_se(residualized_regression_data, corr)
-
-        pval = calculate_pvalue(residualized_regression_data, corr)
-
-        associations.append(
-            create_association(current_gene, variant, slope, slope_se, pval)
-        )
-
-        return pd.DataFrame(associations)
 
     def calculate_associations(self):
         """
@@ -661,18 +736,15 @@ class Cis:
 
         limit = self.quan.shape[0]  # For testing, use small number, eg. 3
 
-        pool = Pool(processes=self.num_cores)
-
-        # Map the gene indices to the helper function using the Pool
-        # and print the progress
-        full_associations = list(
-            tqdm(
-                pool.imap(self.calculate_associations_helper, range(limit)), total=limit
+        with Pool(processes=self.num_cores) as pool:
+            # Map the gene indices to the helper function using the Pool
+            # and print the progress
+            full_associations = list(
+                tqdm(
+                    pool.imap(self.calculate_associations_helper, range(limit)),
+                    total=limit,
+                )
             )
-        )
-
-        pool.close()
-        pool.join()
 
         end = time()
         print("The time of execution: ", (end - start) / 60, " min")
@@ -684,12 +756,10 @@ class Cis:
         """
         Helper function to calculate associations for a single gene index.
 
-        This function performs several steps to calculate the associations for a
-        specific gene index:
-        1. Determines the start and end positions for the gene window.
-        2. Retrieves the variants within the gene window.
-        3. Transforms the variants based on a common segment.
-        4. Performs regressions to calculate associations.
+        In trans negative-control mode (--neg_control), variants are drawn from a
+        different chromosome (chr+1, wrapping) with no plausible cis-regulatory link
+        to the gene. Segment consistency filtering is not applied because it is not
+        meaningful across chromosomes.
 
         Parameters:
         - gene_index (int): The index of the gene for which associations are being calculated.
@@ -697,36 +767,69 @@ class Cis:
         Returns:
         - A dataframe containing the association results for the specified gene index.
         """
-        current_start, current_end = self.start_end_gene_window(gene_index)
-        current_variants = self.get_variants_for_gene_window(current_start, current_end)
+        if self.neg_control:
+            # ── Trans negative control: skip segmentation filtering ──
+            # Segment consistency filtering is not meaningful across chromosomes.
+            transf_variants_alt, transf_variants_ref = self.get_neg_control_variants(
+                gene_index
+            )
+            if transf_variants_alt.empty:
+                return pd.DataFrame()
+        else:
+            # ── Normal cis mode ──
+            current_start, current_end = self.start_end_gene_window(gene_index)
+            current_variants_alt, current_variants_ref, variant_pos = (
+                self.get_variants_for_gene_window(current_start, current_end)
+            )
 
-        transf_variants = self.gene_variants_common_segment(
-            current_start, current_end, current_variants
-        )
+            transf_variants_alt, transf_variants_ref = (
+                self.gene_variants_common_segment(
+                    current_start,
+                    current_end,
+                    current_variants_alt,
+                    current_variants_ref,
+                    variant_pos,
+                )
+            )
 
         if self.all_variants_mode:
-            result = self.process_all_variants(gene_index, transf_variants)
-        else:
-            best_variant, data_best_corr = self.best_variant_data(
-                gene_index, transf_variants, self.quan
+            result = self.process_all_variants(
+                gene_index, transf_variants_alt, transf_variants_ref
             )
+        else:
+            best_variant, data_best = self.best_variant_data(
+                gene_index, transf_variants_alt, transf_variants_ref, self.quan
+            )
+
+            # Guard: if no variant survived filtering, return NA result
+            if best_variant == "" or data_best.empty:
+                current_gene = self.quan.index[gene_index]
+                row = {
+                    "phenotype": current_gene,
+                    "variant": np.nan,
+                    "number_of_samples": 0,
+                    "beta_s": np.nan,
+                    "se_s": np.nan,
+                    "beta_d": np.nan,
+                    "se_d": np.nan,
+                    "t_stat_d": np.nan,
+                    "nominal_p": np.nan,
+                    "r2_alt": np.nan,
+                    "p_adj": np.nan,
+                }
+                if self.record_aic:
+                    row["aic_null"] = np.nan
+                    row["aic_alt"] = np.nan
+                    row["delta_aic_alt_minus_null"] = np.nan
+                return pd.DataFrame([row])
 
             association_res = self.gene_variant_regressions_permutations(
-                gene_index, transf_variants, best_variant, data_best_corr
+                gene_index,
+                transf_variants_alt,
+                transf_variants_ref,
+                best_variant,
+                data_best,
             )
-
-            if self.plot_threshold != -1:
-                p_value = -1
-                if (self.num_permutations) > 0:
-                    p_value = association_res["p_adj"][0]
-                else:
-                    p_value = association_res["nominal_p"][0]
-
-                if not np.isnan(p_value) and p_value < self.plot_threshold:
-                    gene_name = self.quan.index[gene_index]
-                    box_and_whisker(
-                        data_best_corr, gene_name, best_variant, self.plot_dir
-                    )
 
             result = association_res
 
