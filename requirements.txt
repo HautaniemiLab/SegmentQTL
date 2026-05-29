@@ -1,6 +1,5 @@
-matplotlib
+numba
 numpy
 pandas
-scikit_learn
 scipy
 tqdm
