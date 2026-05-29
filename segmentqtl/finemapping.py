@@ -6,6 +6,8 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 from numba import njit
+from tqdm import tqdm
+
 from segment_utils import (
     filter_variants_to_common_segment,
     phenotype_window_bounds,
@@ -13,13 +15,11 @@ from segment_utils import (
 )
 from statistical_utils import (
     adjusted_r_squared,
-    assign_peaks,
     ols_fit,
     r_squared,
     standardize_variants,
     standardize_variants_bootstrap,
 )
-from tqdm import tqdm
 
 # ======================================================================
 # Numba-accelerated kernels for coordinate descent
@@ -492,10 +492,6 @@ class Finemapping:
       phenotype and include the values in the output.
     - r2_stability_threshold: Minimum stability score for variant
       selection in R² computation.
-    - peak_gap: Maximum distance (bp) for grouping variants into
-      clusters for R² pre-filtering.
-    - max_per_cluster: Maximum variants kept per cluster (highest
-      stability) for R² computation.
     """
 
     def __init__(
@@ -519,19 +515,74 @@ class Finemapping:
         cv_tau: float = 0.8,
         min_obs_boot: int = 20,
         compute_r2: bool = False,
-        r2_stability_threshold: float = 0.75,
-        peak_gap: int = 50_000,
-        max_per_cluster: int = 1,
+        r2_stability_threshold: float = 0.6,
     ):
         self.chromosome = chromosome
 
         # Load phenotype data
         self.full_quan = self._load(quantifications, index_col=3)
         self.quan = self.full_quan[self.full_quan["chr"] == self.chromosome]
-        self.samples = self.quan.columns.to_numpy()[3:]
+        quan_samples = self.quan.columns.to_numpy()[3:]
 
         # Load sample-level covariates (optional)
         self.cov = self._load(covariates, index_col=None) if covariates else None
+        if self.cov is not None:
+            # Keep only columns that are actual sample ids from quantifications.
+            # This drops metadata columns such as a leading "sample" column.
+            cov_sample_cols = [s for s in quan_samples if s in self.cov.columns]
+            if len(cov_sample_cols) == 0:
+                raise ValueError(
+                    "[finemapping] covariates file has no sample columns matching "
+                    f"quantifications for {self.chromosome}."
+                )
+            self.cov = self.cov.loc[:, cov_sample_cols]
+
+        # Load genotypes
+        self.geno_alt = self._load(genotype_alt, index_col=0)
+        self.geno_ref = self._load(genotype_ref, index_col=0)
+
+        # Pre-load optional sample-aligned tables so we can include them in
+        # the canonical-sample intersection.
+        cn_df: Optional[pd.DataFrame] = None
+        if copynumber:
+            cn_df = self._load(copynumber, index_col=0)
+        pc_df: Optional[pd.DataFrame] = None
+        if phenotype_covariate:
+            pc_df = self._load(phenotype_covariate, index_col=0)
+
+        # Canonical sample set = intersection of every column-aligned table.
+        # Preserves quantifications order so y_full positional slicing stays
+        # consistent. This is required when (val) genotypes / covariates are
+        # a strict subset of the quantifications samples.
+        sample_set = set(self.geno_alt.columns).intersection(self.geno_ref.columns)
+        if self.cov is not None:
+            sample_set &= set(self.cov.columns)
+        if cn_df is not None:
+            sample_set &= set(cn_df.columns)
+        if pc_df is not None:
+            sample_set &= set(pc_df.columns)
+        self.samples = np.array(
+            [s for s in quan_samples if s in sample_set], dtype=quan_samples.dtype
+        )
+        if len(self.samples) == 0:
+            raise ValueError(
+                f"[finemapping] No samples are common to quantifications, "
+                f"genotypes, and the optional copynumber/phenotype_covariate "
+                f"tables for {self.chromosome}. Check input cohort consistency."
+            )
+        if len(self.samples) < len(quan_samples):
+            dropped = len(quan_samples) - len(self.samples)
+            print(
+                f"[finemapping] {self.chromosome}: dropped {dropped}/"
+                f"{len(quan_samples)} quantification samples not present in "
+                f"all input tables; using {len(self.samples)} samples."
+            )
+
+        # Re-slice quantifications data columns to the canonical sample set
+        # so that the positional `iloc[..., 3:]` access yields y aligned with
+        # self.samples.
+        meta_cols = list(self.quan.columns[:3])
+        self.quan = self.quan[meta_cols + list(self.samples)]
 
         # Load segmentation
         self.segmentation = self._load(segmentation, index_col=0)
@@ -540,16 +591,9 @@ class Finemapping:
             self.segmentation.index.isin(self.samples)
         ]
 
-        # Load genotypes
-        self.geno_alt = self._load(genotype_alt, index_col=0)
-        self.geno_alt = self.geno_alt.loc[:, self.geno_alt.columns.isin(self.samples)][
-            self.samples
-        ]
-
-        self.geno_ref = self._load(genotype_ref, index_col=0)
-        self.geno_ref = self.geno_ref.loc[:, self.geno_ref.columns.isin(self.samples)][
-            self.samples
-        ]
+        # Align genotypes to the canonical sample order
+        self.geno_alt = self.geno_alt[self.samples]
+        self.geno_ref = self.geno_ref[self.samples]
 
         common = self.geno_alt.index.intersection(self.geno_ref.index)
         self.geno_alt = self.geno_alt.loc[common]
@@ -560,23 +604,10 @@ class Finemapping:
             (int(s.split(":")[1]) for s in idx_arr), dtype=np.int64
         )
 
-        # Load phenotype-level copy-number covariate (CNlr, optional)
-        # Reindex columns to self.samples to ensure alignment with y_full
-        if copynumber:
-            cn = self._load(copynumber, index_col=0)
-            self.copynumber_df = cn.loc[:, cn.columns.isin(self.samples)][self.samples]
-        else:
-            self.copynumber_df = None
-
-        # Load phenotype-level covariate (optional, additional unpenalised)
-        # Reindex columns to self.samples to ensure alignment with y_full
-        if phenotype_covariate:
-            pc = self._load(phenotype_covariate, index_col=0)
-            self.phenotype_covariate_df = pc.loc[:, pc.columns.isin(self.samples)][
-                self.samples
-            ]
-        else:
-            self.phenotype_covariate_df = None
+        # Align optional sample tables to the canonical order
+        self.cov = self.cov[self.samples] if self.cov is not None else None
+        self.copynumber_df = cn_df[self.samples] if cn_df is not None else None
+        self.phenotype_covariate_df = pc_df[self.samples] if pc_df is not None else None
 
         # Window & parallelism
         self.window = window
@@ -593,8 +624,6 @@ class Finemapping:
         self.min_obs_boot = min_obs_boot
         self.compute_r2_flag = compute_r2
         self.r2_stability_threshold = r2_stability_threshold
-        self.peak_gap = peak_gap
-        self.max_per_cluster = max_per_cluster
 
         self.bootstrap_nonzero_diagnostics = pd.DataFrame(
             columns=["phenotype", "variant", "bootstrap_iteration", "beta_full"]
@@ -659,6 +688,24 @@ class Finemapping:
         - y: (n_good,) centred phenotype
         - X_unpen: (n_good, q) unpenalised design (intercept + covs)
         - n_samples: int
+        - cnlr_col: column index of CNlr in X_unpen, or None
+        - sample_ids: (n_good,) sample identifiers retained after masking
+        - unpen_blocks_raw: list of (n_good,) raw, post-mask vectors for every
+          non-intercept column of X_unpen, in column order. Useful for
+          re-standardising the validation cohort with main-cohort
+          parameters in frozen-mode validation.
+        - unpen_transforms: list of (mu, sd, frozen_constant) tuples per
+          non-intercept block. ``frozen_constant`` is None when the block
+          was actually standardised on the main cohort (the validation
+          frozen-mode rule is then ``(raw - mu) / sd``). For degenerate
+          blocks (sd <= 1e-10) ``frozen_constant`` is the constant value
+          the block carried during training; the validation frozen-mode
+          rule is to replace the entire column by that constant so theta
+          operates on the exact training feature.
+        - unpen_names: human-readable label per non-intercept block, in
+          the same order as ``unpen_transforms`` and the non-intercept
+          columns of ``X_unpen`` (e.g. ``["CN", "phenotype_cov", "sex",
+          "age"]``). The intercept column is unnamed (always present).
         """
         current_pheno = self.quan.index[pheno_index]
 
@@ -704,14 +751,38 @@ class Finemapping:
 
         # 6) Sample-level covariates
         cov_full: List[np.ndarray] = []
+        cov_names: List[str] = []
         if self.cov is not None:
-            cov_full = [
-                pd.to_numeric(self.cov.loc[c], errors="coerce")
-                .to_numpy()
-                .flatten()
-                .astype(float)
-                for c in self.cov.index
-            ]
+            for covariate in self.cov.index:
+                cov_full.append(
+                    pd.to_numeric(self.cov.loc[covariate], errors="coerce")
+                    .to_numpy()
+                    .flatten()
+                    .astype(float)
+                )
+                cov_names.append(str(covariate))
+
+        # Defensive check: all sample-aligned vectors must have the same length.
+        expected_n = len(y_full)
+        if cnlr_full is not None and len(cnlr_full) != expected_n:
+            raise ValueError(
+                f"[finemapping] CN covariate length mismatch for {current_pheno!r}: "
+                f"expected {expected_n}, got {len(cnlr_full)}. "
+                "Check sample columns across quantifications/covariates/genotypes."
+            )
+        if phenotype_cov_full is not None and len(phenotype_cov_full) != expected_n:
+            raise ValueError(
+                f"[finemapping] phenotype_covariate length mismatch for {current_pheno!r}: "
+                f"expected {expected_n}, got {len(phenotype_cov_full)}. "
+                "Check sample columns across quantifications/covariates/genotypes."
+            )
+        for cov_name, cv in zip(cov_names, cov_full):
+            if len(cv) != expected_n:
+                raise ValueError(
+                    f"[finemapping] sample covariate {cov_name!r} length mismatch for "
+                    f"{current_pheno!r}: expected {expected_n}, got {len(cv)}. "
+                    "Check sample columns across quantifications/covariates/genotypes."
+                )
 
         # 7) Global sample mask: non-NaN in y, CNlr, phenotype_cov, covariates
         #    (d is allowed to be NaN -- handled by EN as missing)
@@ -736,31 +807,42 @@ class Finemapping:
 
         # 8) Build X_unpen = [intercept, CNlr_std, phenotype_cov_std, cov_std...]
         blocks: List[np.ndarray] = [np.ones(n_good)]
+        unpen_blocks_raw: List[np.ndarray] = []
+        unpen_transforms: List[Tuple[float, float, Optional[float]]] = []
+        unpen_names: List[str] = []
         cnlr_col: Optional[int] = None
 
+        def _record_block(raw_vec: np.ndarray) -> np.ndarray:
+            unpen_blocks_raw.append(raw_vec.copy())
+            mu = float(np.mean(raw_vec))
+            sd = float(np.std(raw_vec))
+            if sd > 1e-10:
+                unpen_transforms.append((mu, sd, None))
+                return (raw_vec - mu) / sd
+            # Degenerate: training column was the constant ``mu``. Record
+            # ``mu`` as the frozen constant so validation frozen-mode
+            # substitutes the same constant column rather than passing
+            # validation's own (possibly different) constant through.
+            unpen_transforms.append((mu, 1.0, mu))
+            return raw_vec
+
         if cnlr_full is not None:
-            cnlr = cnlr_full[mask]
-            mu_cn, sd_cn = float(np.mean(cnlr)), float(np.std(cnlr))
-            if sd_cn > 1e-10:
-                cnlr = (cnlr - mu_cn) / sd_cn
+            cnlr = _record_block(cnlr_full[mask])
             cnlr_col = len(blocks)
+            unpen_names.append("CN")
             blocks.append(cnlr)
 
         if phenotype_cov_full is not None:
-            pcov = phenotype_cov_full[mask]
-            mu_pc, sd_pc = float(np.mean(pcov)), float(np.std(pcov))
-            if sd_pc > 1e-10:
-                pcov = (pcov - mu_pc) / sd_pc
+            pcov = _record_block(phenotype_cov_full[mask])
+            unpen_names.append("phenotype_cov")
             blocks.append(pcov)
 
-        for cv in cov_full:
-            c = cv[mask]
-            mu_c, sd_c = float(np.mean(c)), float(np.std(c))
-            if sd_c > 1e-10:
-                c = (c - mu_c) / sd_c
-            blocks.append(c)
+        for cv, cv_name in zip(cov_full, cov_names):
+            blocks.append(_record_block(cv[mask]))
+            unpen_names.append(cv_name)
 
         X_unpen = np.column_stack(blocks)
+        sample_ids = self.samples[mask]
 
         return {
             "variant_ids": variant_ids_all,
@@ -769,6 +851,10 @@ class Finemapping:
             "X_unpen": X_unpen,
             "n_samples": n_good,
             "cnlr_col": cnlr_col,
+            "sample_ids": sample_ids,
+            "unpen_blocks_raw": unpen_blocks_raw,
+            "unpen_transforms": unpen_transforms,
+            "unpen_names": unpen_names,
         }
 
     def _stability_selection(
@@ -907,7 +993,7 @@ class Finemapping:
         cnlr_col = data["cnlr_col"]
 
         # Standardise & coverage filter (full data)
-        d_std, obs_masks, keep_idx, sd_vec = standardize_variants(
+        d_std, obs_masks, keep_idx, sd_vec, _mu_vec = standardize_variants(
             d_raw, self.coverage_tau, n_samples
         )
         if len(keep_idx) == 0:
@@ -1113,75 +1199,62 @@ class Finemapping:
         best_beta_refit: np.ndarray,
         kept_ids: np.ndarray,
         n_samples: int,
-    ) -> dict:
+    ) -> Optional[dict]:
         """
         Compute baseline vs full-model R² using already-fitted results.
 
-        Selects stable variants (π ≥ r2_stability_threshold with non-zero
-        beta), clusters them by position, keeps at most max_per_cluster per
-        cluster (ties broken by abs(beta)), then fits a missing-aware
-        unpenalised model (MissingAwareElasticNet with λ=0) for the full
-        model and standard OLS for the baseline (covariates only).
+        Selects all stable variants (π ≥ r2_stability_threshold with
+        non-zero beta), then fits a missing-aware unpenalised model
+        (MissingAwareElasticNet with λ=0) for the full model and standard
+        OLS for the baseline (covariates only).
 
         Predictions are computed with missing-aware logic: for each sample,
         only observed variant entries contribute to ŷ. R² is computed over
         all n samples — no imputation is performed.
 
-        Returns a dict with one row of R² results for this phenotype,
-        or None if no variants qualify.
+        Returns a dict with one row of R² results for this phenotype.
+        If no variants qualify for the full model, baseline R² is still
+        returned and full-model/variant-related fields are left empty.
         """
-        from collections import defaultdict
-
         n = len(y)
 
-        # Identify stable variants with non-zero effect
-        # Store (index_in_kept, stability, abs_beta, position)
+        # Baseline model: always reported when R² computation is enabled.
+        theta_base = ols_fit(y, X_unpen)
+        yhat_base = X_unpen @ theta_base
+        r2_base = r_squared(y, yhat_base)
+        r2_base_adj = adjusted_r_squared(r2_base, n, X_unpen.shape[1] - 1)
+
+        # Identify stable variants with non-zero effect.
         candidates = []
         for j in range(len(kept_ids)):
             if (
                 pi_v[j] >= self.r2_stability_threshold
                 and abs(best_beta_refit[j]) > 1e-10
             ):
-                pos_j = int(kept_ids[j].split(":")[1])
-                candidates.append(
-                    (j, float(pi_v[j]), abs(float(best_beta_refit[j])), pos_j)
-                )
+                candidates.append(j)
 
         if len(candidates) == 0:
-            return None
+            return {
+                "phenotype": phenotype,
+                "n_samples": n_samples,
+                "r2_baseline": r2_base,
+                "r2_baseline_adj": r2_base_adj,
+                "r2_full": np.nan,
+                "r2_full_adj": np.nan,
+                "delta_r2": np.nan,
+                "delta_r2_adj": np.nan,
+                "r2_n_variants": np.nan,
+                "r2_variants": np.nan,
+            }
 
-        # Cluster by position and pre-filter
-        positions = np.array([c[3] for c in candidates])
-        peak_ids = assign_peaks(positions, self.peak_gap)
-
-        # Group by cluster; sort key = (stability, abs_beta)
-        peak_groups: Dict[int, List[Tuple[float, float, int]]] = defaultdict(list)
-        for idx, (j, pi, abs_b, _pos) in enumerate(candidates):
-            peak_groups[peak_ids[idx]].append((pi, abs_b, j))
-
-        filtered_indices = []
-        for members in peak_groups.values():
-            # Sort by stability desc, then abs(beta) desc to break ties
-            members.sort(key=lambda x: (x[0], x[1]), reverse=True)
-            for _, _, j in members[: self.max_per_cluster]:
-                filtered_indices.append(j)
-        sel_indices = np.array(sorted(filtered_indices))
-        n_clusters = len(peak_groups)
-
-        if len(sel_indices) == 0:
-            return None
+        # Keep all stability-supported variants (no peak-based down-selection).
+        sel_indices = np.array(candidates, dtype=int)
 
         # Variant IDs and obs masks for the selected subset
         selected_variant_ids = [kept_ids[j] for j in sel_indices]
         d_sel = d_std[sel_indices, :]  # (p_sel, n)
         sel_obs_masks = [obs_masks[j] for j in sel_indices]
         p_sel = len(sel_indices)
-
-        # ── Baseline model: y ~ X_unpen (no missingness) ──
-        theta_base = ols_fit(y, X_unpen)
-        yhat_base = X_unpen @ theta_base
-        r2_base = r_squared(y, yhat_base)
-        r2_base_adj = adjusted_r_squared(r2_base, n, X_unpen.shape[1] - 1)
 
         # ── Full model: missing-aware unpenalised fit (EN with λ=0) ──
         en = MissingAwareElasticNet(alpha_en=0.5, max_iter=2000, tol=1e-8)
@@ -1215,6 +1288,5 @@ class Finemapping:
             "delta_r2": r2_full_val - r2_base,
             "delta_r2_adj": r2_full_adj - r2_base_adj,
             "r2_n_variants": len(sel_indices),
-            "r2_n_clusters": n_clusters,
             "r2_variants": ";".join(selected_variant_ids),
         }

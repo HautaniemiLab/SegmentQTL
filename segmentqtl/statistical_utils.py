@@ -38,7 +38,7 @@ def standardize_variants(
     coverage_tau: float,
     n_total: int,
     min_obs: int = 30,
-) -> Tuple[np.ndarray, List[np.ndarray], np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, List[np.ndarray], np.ndarray, np.ndarray, np.ndarray]:
     """
     Standardise each variant predictor d_v on its observed entries.
 
@@ -57,6 +57,8 @@ def standardize_variants(
     - keep_idx: (p_kept,) original row indices that were retained.
     - sd_vec: (p_kept,) per-variant SD used for standardisation (for
       back-transforming coefficients to raw units).
+    - mu_vec: (p_kept,) per-variant mean used for standardisation
+      (needed to apply training preprocessing to a validation cohort).
     """
     p, n = d_raw.shape
     min_required = max(min_obs, int(coverage_tau * n_total))
@@ -65,6 +67,7 @@ def standardize_variants(
     obs_masks: List[np.ndarray] = []
     keep: List[int] = []
     sd_list: List[float] = []
+    mu_list: List[float] = []
 
     for v in range(p):
         idx = np.flatnonzero(~np.isnan(d_raw[v]))
@@ -85,15 +88,17 @@ def standardize_variants(
         obs_masks.append(idx)
         keep.append(v)
         sd_list.append(float(sd))
+        mu_list.append(float(mu))
 
     keep_idx = np.array(keep, dtype=int)
     sd_vec = np.array(sd_list, dtype=float)
+    mu_vec = np.array(mu_list, dtype=float)
     if len(keep) == 0:
         d_std = np.empty((0, n))
     else:
         d_std = np.vstack(d_std_rows)
 
-    return d_std, obs_masks, keep_idx, sd_vec
+    return d_std, obs_masks, keep_idx, sd_vec, mu_vec
 
 
 def standardize_variants_bootstrap(
